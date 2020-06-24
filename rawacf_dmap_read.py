@@ -169,6 +169,7 @@ class RawacfDmapRead(object):
                              'ptab' : [],
                              'ltab' : None,
                              'slist' : None,
+                             'nave' : [],
                              'pwr0' : [],
                              'acfd' : [],
                              'xcfd' : []}
@@ -180,6 +181,8 @@ class RawacfDmapRead(object):
                         split_data['tfreq'].append(scaler[-1])
                     elif scaler[0] == b"offset":
                         split_data['offset'].append(scaler[-1])
+                    elif scaler[0] == b"nave":
+                        split_data['nave'].append(scaler[-1])
                     elif scaler[0] == b"mpinc":
                         split_data['mpinc'] = scaler[-1]
                     elif scaler[0] == b"mppul":
@@ -217,6 +220,7 @@ class RawacfDmapRead(object):
 
             split_data['tfreq'] = np.array(split_data['tfreq'])
             split_data['offset'] = np.array(split_data['offset'])
+            split_data['nave'] = np.array(split_data['nave'])
             split_data['pwr0'] = np.array(split_data['pwr0'])
 
             split_data['acfd'] = np.array(split_data['acfd'])

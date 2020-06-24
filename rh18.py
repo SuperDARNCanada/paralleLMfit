@@ -3,35 +3,82 @@ import rawacf_dmap_read as rdr
 from data_fitting import fit_data
 import sys
 
-def estimate_max_self_clutter(num_range_gates, ltab, ptab, mpinc, pwr0, lagfr, smsep):
-    first_range_in_samps = lagfr/smsep
-    lags = ltab[0:-1,1] - ltab[0:-1,0]
+def determine_noise(pwr0):
 
-    lag_pairs = ltab[0:-1, :]
+    sorted_pwr0 = np.sort(pwr0)
+    noise = np.mean(sorted_pwr0[:,0:10], axis=1)
+    return noise
 
-    num_lags = lags.shape[0]
-    num_pulses = ptab.shape[0]
+def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
 
-    ranges_per_tau = mpinc / smsep
+    total_signal = (pwr0[:,np.newaxis,:] + noise[:,np.newaxis,np.newaxis] + clutter)
 
-    time_to_first_range = lagfr / 2
+    error = total_signal / np.sqrt(nave[:,np.newaxis,np.newaxis])
+    error = np.repeat(error[:,:,np.newaxis,:], blanking_mask.shape[1], axis=2)
+
+    mask = np.repeat(blanking_mask[np.newaxis,...], error.shape[0], axis=0)
+
+
+    error[mask] = 1e50
+    error = np.einsum('ijkl->ilkj', error)
+    error = error.reshape((error.shape[0], error.shape[1], error.shape[2] * error.shape[3]))
+
+    weights_shape = (error.shape[0], error.shape[1], error.shape[2], error.shape[2])
+    weights = np.zeros(weights_shape)
+
+    diag = np.arange(error.shape[-1])
+    weights[:,:,diag,diag] = 1
+
+
+    return weights
+
+
+def calculate_samples(num_range_gates, ltab, ptab, mpinc, lagfr, smsep):
 
     ranges = np.arange(num_range_gates)
     pulses_by_ranges = np.repeat(ptab[:,np.newaxis], num_range_gates, axis=1)
-    samples = (pulses_by_ranges * ranges_per_tau) + ranges[np.newaxis,:] + (lagfr/smsep)
 
+    ranges_per_tau = mpinc / smsep
 
+    pulses_as_samples = (pulses_by_ranges * ranges_per_tau)
+    first_range_in_samps = lagfr/smsep
+    samples = (pulses_by_ranges * ranges_per_tau) + ranges[np.newaxis,:] + first_range_in_samps
+
+    lags = ltab[0:-1,1] - ltab[0:-1,0]
+    lag_pairs = ltab[0:-1, :]
     lags_pulse_idx = np.searchsorted(ptab, lag_pairs)
+
     samples_for_lags = samples[lags_pulse_idx]
 
-    pulse_as_sample = (pulses_by_ranges * ranges_per_tau).T[np.newaxis,np.newaxis,...]
-    affected_ranges = samples_for_lags[...,np.newaxis] - pulse_as_sample - (lagfr/smsep)
+    return pulses_as_samples, samples_for_lags
+
+def find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags):
+
+    blanked_1 = pulses_as_samples.T[np.newaxis,np.newaxis,...]
+    blanked_2 = blanked_1 + 1
+
+    x = blanked_1 == samples_for_lags[...,np.newaxis]
+    y = blanked_2 == samples_for_lags[...,np.newaxis]
+
+
+    blanking_mask = np.any(np.logical_or(x,y), axis=-1)
+
+    return blanking_mask
+
+
+
+def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags, pwr0, lagfr, smsep):
+
+    pulses_as_samples = pulses_as_samples.T[np.newaxis,np.newaxis,...]
+    first_range_in_samps = lagfr/smsep
+    affected_ranges = samples_for_lags[...,np.newaxis] - pulses_as_samples - first_range_in_samps
     affected_ranges = affected_ranges.astype(int)
 
-
+    ranges = np.arange(num_range_gates)
     ranges_reshape = ranges[np.newaxis,np.newaxis,:,np.newaxis]
-    condition = (np.logical_and((affected_ranges < num_range_gates),
-                    np.logical_and((affected_ranges == ranges_reshape), (affected_ranges >= 0))))
+    condition = np.logical_and((affected_ranges <= samples_for_lags[...,np.newaxis]),
+                    (np.logical_and((affected_ranges < num_range_gates),
+                    np.logical_and((affected_ranges != ranges_reshape), (affected_ranges >= 0)))))
 
     filtered_ranges = np.where(condition, affected_ranges, -1)
 
@@ -40,14 +87,15 @@ def estimate_max_self_clutter(num_range_gates, ltab, ptab, mpinc, pwr0, lagfr, s
 
     affected_pwr = tmp_pwr[:,filtered_ranges.flatten()]
     affected_pwr = affected_pwr.reshape((affected_pwr.shape[0],) + filtered_ranges.shape)
+    affected_pwr = np.sqrt(affected_pwr)
 
-    tmp = np.sqrt(pwr0[:,np.newaxis,np.newaxis,:,np.newaxis] * affected_pwr)
-    cri_term12 = np.einsum('...klm->...l', tmp)
+    tmp = np.sqrt(pwr0[:,np.newaxis,np.newaxis,:,np.newaxis]) * affected_pwr
+    clutter_term12 = np.einsum('...klm->...l', tmp)
+    clutter_term3 = np.einsum('...kl,...lk->...k', affected_pwr[:,:,0,:,:], np.einsum('...lm->...ml',affected_pwr[:,:,1,:,:]))
 
+    clutter = clutter_term12 + clutter_term3
 
-    cri_term3 = np.einsum('...kl,...lk->...k', affected_pwr[:,:,0,:,:], np.einsum('...lm->...ml',affected_pwr[:,:,1,:,:]))
-
-    cri = cri_term12 + cri_term3
+    return clutter
 
     # pwr0_reshape = np.repeat(tmp_pwr[:,np.newaxis,np.newaxis,np.newaxis,:], tmp_pwr.shape[-1], axis=3)
     # pwr0_reshape = np.repeat(pwr0_reshape, )
@@ -161,7 +209,9 @@ def estimate_max_self_clutter(num_range_gates, ltab, ptab, mpinc, pwr0, lagfr, s
 
 def calculate_t(lags, mpinc):
     lags = lags[0:-1,1] - lags[0:-1,0]
-    t = lags * mpinc * 1e-6
+
+    # Need braces to enforce data type. Lags is short and will overflow.
+    t = lags * (mpinc * 1e-6)
     t = t[np.newaxis, np.newaxis,:]
 
     return t
@@ -174,33 +224,32 @@ def calculate_wavelength(tfreq):
     return wavelength
 
 def calculate_constants(wavelength, t):
-    real_constant = (-1 * 2 * np.pi * t)/wavelength
-    real_constant = real_constant[:,:,np.newaxis,:]
+    W_constant = (-1 * 2 * np.pi * t)/wavelength
+    W_constant = W_constant[:,:,np.newaxis,:]
 
-    imag_constant = (1j * 4 * np.pi * t)/wavelength
-    imag_constant = imag_constant[:,:,np.newaxis,:]
 
-    return {'real' : real_constant, 'imag' : imag_constant}
+    V_constant = (1j * 4 * np.pi * t)/wavelength
+    V_constant = V_constant[:,:,np.newaxis,:]
 
-def calculate_initial_W(num_records, num_range_gates, num_velocity_models, num_lags):
-    W = np.ones((num_records, num_range_gates, num_velocity_models, num_lags)) * 200.0
+
+    return {'W' : W_constant, 'V' : V_constant}
+
+def calculate_initial_W(array_shape):
+    W = np.ones(array_shape) * 200.0
 
     return W
 
-def calculate_initial_V(wavelength, num_velocity_models, num_lags, mpinc):
+def calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc):
     nyquist_v = wavelength/(4.0 * mpinc * 1e-6)
+
     step = 2 * nyquist_v / num_velocity_models
     tmp = np.arange(num_velocity_models, dtype=np.float64)[np.newaxis,np.newaxis,:]
     tmp = tmp * step
-    nyquist_v_steps = (-1 * nyquist_v) + (tmp * step)
-    nyquist_v_steps = np.repeat(nyquist_v_steps[...,np.newaxis], num_lags, axis=-1)
+    nyquist_v_steps = (-1 * nyquist_v) + tmp
+
+    nyquist_v_steps = nyquist_v_steps[...,np.newaxis]
 
     return nyquist_v_steps
-
-
-
-def calculate_initial_p0(pwr0):
-    return pwr0[:,:,np.newaxis,np.newaxis]
 
 
 def calculate_weights(num_records, num_range_gates, num_velocity_models, num_lags):
@@ -214,53 +263,81 @@ def calculate_weights(num_records, num_range_gates, num_velocity_models, num_lag
     return {'real' : weights_real, 'imag' : weights_imag}
 
 def fit_all_records(records_data):
+    num_velocity_models = 30
+    step = 10
+
     for k,v in records_data.items():
         data_for_fitting = v['split_data']
 
         mpinc = data_for_fitting['mpinc']
         lags = data_for_fitting['ltab']
-
+        lagfr = data_for_fitting['lagfr']
+        pwr0 = data_for_fitting['pwr0']
+        pwr0[...] = 1.0
+        smsep = data_for_fitting['smsep']
+        num_range_gates = data_for_fitting['nrang']
         pulses = data_for_fitting['ptab']
+        transmit_freq = data_for_fitting['tfreq']
+        transmit_freq[...] = 10500
+        num_averages = data_for_fitting['nave']
+        num_lags = data_for_fitting['acfd'].shape[2]
 
+        acf = np.einsum('...ij->...ji', data_for_fitting['acfd'])
+        acf[...,0,:] = 1.0
+        acf[...,1,:] = 0.0
+
+        acf = acf.reshape((acf.shape[0], acf.shape[1], acf.shape[2] * acf.shape[3]))
         t = calculate_t(lags, mpinc)
+        wavelength = calculate_wavelength(transmit_freq)
 
-        wavelength = calculate_wavelength(data_for_fitting['tfreq'])
+
+        noise = determine_noise(pwr0)
+
+
+
+        pulses_as_samples, samples_for_lags = calculate_samples(num_range_gates, lags, pulses,
+                                                                    mpinc, lagfr, smsep)
+        blanking_mask = find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags)
+        clutter = estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags,
+                                            pwr0, lagfr, smsep)
+        fo_weights = first_order_weights(pwr0, noise, clutter, num_averages, blanking_mask)
+
+
+
 
         model_constants = calculate_constants(wavelength, t)
 
+        initial_V = calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc)
+        initial_W = calculate_initial_W(initial_V.shape)
+        initial_p0 = pwr0[:,:,np.newaxis,np.newaxis]
+
         total_records = len(v['record_nums'])
+
 
         even_chunks = total_records // 20
         remainder = total_records - (even_chunks * 20)
 
         fits = []
         def do_fits(start, stop):
-            wavelength = calculate_wavelength(data_for_fitting['tfreq'][start:stop])
 
-            model_constants = calculate_constants(wavelength, t)
+            W_i = initial_W[start:stop,...]
+            V_i = initial_V[start:stop,...]
+            p0_i = initial_p0[start:stop,...]
 
-            acf_real = data_for_fitting['acfd'][start:stop,...,0][...,np.newaxis,:]
-            acf_imag = data_for_fitting['acfd'][start:stop,...,1][...,np.newaxis,:]
+            W_constant_i = model_constants['W'][start:stop,...]
+            V_constant_i = model_constants['V'][start:stop,...]
 
-            acf = {'real' : acf_real, 'imag' : acf_imag}
+            model_params = {'p0' : p0_i, 'W' : W_i, 'V' : V_i}
+            model_constants_i = {'W' : model_constants['W'][start:stop,...],
+                                 'V' : model_constants['V'][start:stop,...]}
 
-            num_records = acf_real.shape[0]
-            num_range_gates = acf_real.shape[1]
-            num_velocity_models = 30
-            num_lags = data_for_fitting['mplgs']
+            weights = fo_weights[start:stop,...]
 
-            estimate_max_self_clutter(num_range_gates, lags, pulses, mpinc, data_for_fitting['pwr0'], data_for_fitting['lagfr'], data_for_fitting['smsep'])
+            acf_i = acf[start:stop,...]
 
 
-            initial_W = calculate_initial_W(num_records, num_range_gates, num_velocity_models, num_lags)
-            initial_V = calculate_initial_V(wavelength[start:stop,...], num_velocity_models, num_lags, mpinc)
-            initial_p0 = calculate_initial_p0(data_for_fitting['pwr0'][start:stop])
+            fits.append(fit_data(model_params, model_constants_i, acf_i, weights))
 
-            model_params = {'p0' : initial_p0, 'W' : initial_W, 'V' : initial_V}
-
-            weights = calculate_weights(num_records, num_range_gates, num_velocity_models, num_lags)
-
-            fits.append(fit_data(model_params, model_constants, acf, weights))
 
         if even_chunks > 0:
             for i in range(even_chunks-1):
@@ -271,7 +348,6 @@ def fit_all_records(records_data):
 
         fits = np.array(fits).reshape(-1,*fits.shape[2:])
         records_data[k]['fitted_data'] = fits
-
 
 
 if __name__ == '__main__':
