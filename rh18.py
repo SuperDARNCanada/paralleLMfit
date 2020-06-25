@@ -235,7 +235,7 @@ def calculate_constants(wavelength, t):
     return {'W' : W_constant, 'V' : V_constant}
 
 def calculate_initial_W(array_shape):
-    W = np.ones(array_shape) * 200.0
+    W = np.ones(array_shape) * 10.0
 
     return W
 
@@ -273,7 +273,7 @@ def fit_all_records(records_data):
         lags = data_for_fitting['ltab']
         lagfr = data_for_fitting['lagfr']
         pwr0 = data_for_fitting['pwr0']
-        pwr0[...] = 1.0
+        pwr0[...] = 2.0
         smsep = data_for_fitting['smsep']
         num_range_gates = data_for_fitting['nrang']
         pulses = data_for_fitting['ptab']
@@ -294,15 +294,12 @@ def fit_all_records(records_data):
         noise = determine_noise(pwr0)
 
 
-
         pulses_as_samples, samples_for_lags = calculate_samples(num_range_gates, lags, pulses,
                                                                     mpinc, lagfr, smsep)
         blanking_mask = find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags)
         clutter = estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags,
                                             pwr0, lagfr, smsep)
         fo_weights = first_order_weights(pwr0, noise, clutter, num_averages, blanking_mask)
-
-
 
 
         model_constants = calculate_constants(wavelength, t)
