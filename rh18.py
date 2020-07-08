@@ -235,7 +235,7 @@ def calculate_constants(wavelength, t):
     return {'W' : W_constant, 'V' : V_constant}
 
 def calculate_initial_W(array_shape):
-    W = np.ones(array_shape) * 10.0
+    W = np.ones(array_shape) * 200.0
 
     return W
 
@@ -273,7 +273,7 @@ def fit_all_records(records_data):
         lags = data_for_fitting['ltab']
         lagfr = data_for_fitting['lagfr']
         pwr0 = data_for_fitting['pwr0']
-        pwr0[...] = 2.0
+        pwr0[...] = 1.0
         smsep = data_for_fitting['smsep']
         num_range_gates = data_for_fitting['nrang']
         pulses = data_for_fitting['ptab']
@@ -301,14 +301,19 @@ def fit_all_records(records_data):
                                             pwr0, lagfr, smsep)
         fo_weights = first_order_weights(pwr0, noise, clutter, num_averages, blanking_mask)
 
-
         model_constants = calculate_constants(wavelength, t)
 
         initial_V = calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc)
         initial_W = calculate_initial_W(initial_V.shape)
-        initial_p0 = pwr0[:,:,np.newaxis,np.newaxis]
+        initial_p0 = pwr0[:,:,np.newaxis,np.newaxis] * 2
 
         total_records = len(v['record_nums'])
+        consistent_shape = (total_records, num_range_gates, num_velocity_models,1)
+        reshaper = np.zeros(consistent_shape)
+
+        initial_V = initial_V + reshaper
+        initial_W = initial_W + reshaper
+        initial_p0 = initial_p0 + reshaper
 
 
         even_chunks = total_records // 20
@@ -331,7 +336,6 @@ def fit_all_records(records_data):
             weights = fo_weights[start:stop,...]
 
             acf_i = acf[start:stop,...]
-
 
             fits.append(fit_data(model_params, model_constants_i, acf_i, weights))
 

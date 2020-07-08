@@ -1,4 +1,6 @@
 import numpy as np
+import copy
+import sys
 
 def einsum_transpose(ndarray):
     return np.einsum('...lm->...ml', ndarray)
@@ -15,12 +17,21 @@ def einsum_reduce_dimensions(ndarray):
 def compute_chi2(y_yp, weights):
 
     y_ypt = einsum_transpose(y_yp)
-    chi_2 = einsum_chained_matmul(y_ypt, weights[:,:,np.newaxis,:,:], y_ypt)
+    chi_2 = einsum_chained_matmul(y_ypt, weights[:,:,np.newaxis,:,:], y_yp)
     chi_2 = einsum_reduce_dimensions(chi_2)
 
     return chi_2
 
-def levenburg_marquardt_update(acf, model_constants, weights, fitted_params, lm_step):
+def levenburg_marquardt_update(acf, model_constants, weights, fitted_params, lm_step, converged, diverged):
+
+    e1 = 1e-3
+    e2 = 1e-3
+    e3 = 1e-1
+    e4 = 1e-1
+
+    fit_mask = (converged | diverged)
+    fit_mask_inv = ~fit_mask
+
 
     model = compute_model_and_derivatives(model_constants, **fitted_params)
     y_yp = (acf[:,:,np.newaxis,:] - model['model'])[...,np.newaxis]
@@ -31,32 +42,48 @@ def levenburg_marquardt_update(acf, model_constants, weights, fitted_params, lm_
     Jt_w_J = einsum_matmul(Jt_w, model['J'])
 
     diag = np.arange(Jt_w_J.shape[-1])
-    Jt_w_J_diag = Jt_w_J[...,diag,diag]
 
     lm_Jt_w_J_diag = np.zeros(Jt_w_J.shape)
-    lm_Jt_w_J_diag[...,diag,diag] = (lm_step + Jt_w_J[...,diag,diag])
+    lm_Jt_w_J_diag[...,diag,diag] = (lm_step * Jt_w_J[...,diag,diag])
 
 
-    Jt_w_Jinv = np.linalg.inv(Jt_w_J + lm_Jt_w_J_diag)
+    grad = Jt_w_J + lm_Jt_w_J_diag
+    converged_grad = np.full(grad.shape, False)
+    converged_grad[...,diag,diag] = fit_mask
+    grad[converged_grad] = 1.0
+
+
+    Jt_w_Jinv = np.linalg.inv(grad)
 
     Jt_w_yyp = einsum_matmul(Jt_w, y_yp)
 
     h_lm = einsum_matmul(Jt_w_Jinv, Jt_w_yyp)
-    #print(h_lm[0,0,0])
 
-    # tmp_p0 = fitted_params['p0'] + h_lm[:,:,:,0]
-    # tmp_W = fitted_params['W'] + h_lm[:,:,:,1]
-    # tmp_V = = fitted_params['V'] + h_lm[:,:,:,2]
+    tmp_params = copy.copy(fitted_params)
 
-    # tmp_fitted_params = {'p0' : tmp_p0, 'W' : tmp_W, 'V' : tmp_V}
+    tmp_params['p0'] = fitted_params['p0'] + h_lm[:,:,:,0]
+    tmp_params['W'] = fitted_params['W'] + h_lm[:,:,:,1]
+    tmp_params['V'] = fitted_params['V'] + h_lm[:,:,:,2]
 
-    fitted_params['p0'] = fitted_params['p0'] + h_lm[:,:,:,0]
-    fitted_params['W'] = fitted_params['W'] + h_lm[:,:,:,1]
-    fitted_params['V'] = fitted_params['V'] + h_lm[:,:,:,2]
 
-    model_new = compute_model_and_derivatives(model_constants, **fitted_params)
+    d1 = tmp_params['p0'] < 0.0
+    d2 = tmp_params['W'] < -200
+    d3 = tmp_params['V'] > 3000
+    d4 = tmp_params['V'] < -3000
+
+    tmp_params['p0'][d1] = 0.0
+    tmp_params['W'][d2] = -200
+    tmp_params['V'][d3] = 3000
+    tmp_params['V'][d4] = -3000
+    diverged |= d1 | d2 | d3 | d4
+
+    fit_mask = (converged | diverged)
+    fit_mask_inv = ~fit_mask
+
+    model_new = compute_model_and_derivatives(model_constants, **tmp_params)
     y_yp_new = (acf[:,:,np.newaxis,:] - model_new['model'])[...,np.newaxis]
     chi_2_new = compute_chi2(y_yp_new, weights)
+
 
     rho_numerator = chi_2 - chi_2_new
 
@@ -65,39 +92,44 @@ def levenburg_marquardt_update(acf, model_constants, weights, fitted_params, lm_
     rho_denominator = einsum_reduce_dimensions(rho_denominator)
 
     rho = rho_numerator/rho_denominator
-    #print(rho.shape, h_lm.shape)
+
+    rho[fit_mask] = 1.0
 
     L_increase = 11
     L_decrease = 9
 
     a = np.maximum(lm_step/L_decrease, 1e-7)
-    a[rho<=1e-1] = 0.0
-    # tmp = a
-    # tmp[rho<=1e-1] = 0.0
-    # print(tmp[0,0])
-
-
-    #print('a', a[0,0])
+    a[rho<=e4] = 0.0
 
     b = np.minimum(lm_step*L_increase, 1e7)
-    b[rho>1e-1] = 0.0
-    # print(b[0,0])
-
-    #print('b', b[0,0])
+    b[rho>e4] = 0.0
 
     lm_step_new = a + b
-    # lm_step_new = np.zeros(lm_step.shape)
-    # lm_step_new[rho>1e-1] = a[rho>1e-1]
-    # lm_step_new[rho<=1e-1] = b[rho<=1e-1]
 
-    #print(lm_step_new[0,0])
 
-    tmp_h_lm = np.where(rho[...,np.newaxis]<=1e-1, h_lm, 0.0)
-    #print(tmp_h_lm[0,0,:,0])
+    rho_mask = (rho>e4) & fit_mask_inv
 
-    fitted_params['p0'] = fitted_params['p0'] - tmp_h_lm[:,:,:,0]
-    fitted_params['W'] = fitted_params['W'] - tmp_h_lm[:,:,:,1]
-    fitted_params['V'] = fitted_params['V'] - tmp_h_lm[:,:,:,2]
+
+    fitted_params['p0'][rho_mask] = tmp_params['p0'][rho_mask]
+    fitted_params['W'][rho_mask] = tmp_params['W'][rho_mask]
+    fitted_params['V'][rho_mask] = tmp_params['V'][rho_mask]
+
+
+
+
+    Jt = einsum_transpose(model_new['J'])
+    Jt_w_yyp = einsum_chained_matmul(Jt, weights[:,:,np.newaxis,:,:], y_yp_new)
+
+    convergence_1 = np.abs(Jt_w_yyp).max(axis=3) < e1
+
+    convergence_2 = np.abs(h_lm/rho[...,np.newaxis,:]).max(axis=3) < e2
+
+    m = model_new['model'].shape[-1]
+    n = model_new['J'].shape[-1]
+
+    convergence_3 = (chi_2_new/(m - n + 1)) < e3
+
+    converged |= convergence_1 | convergence_2 | convergence_3
 
     return lm_step_new
 
@@ -123,7 +155,7 @@ def compute_model_and_derivatives(model_constants, p0, W, V):
 
         return J
 
-    model_dict['model'] =np.concatenate((model.real, model.imag), axis=-1)
+    model_dict['model'] = np.concatenate((model.real, model.imag), axis=-1)
 
     J_model = compute_J()
     J_model = np.concatenate((J_model.real, J_model.imag), axis=-2)
@@ -151,28 +183,23 @@ def calculate_gauss_newton_update(acf, model, weights):
 def fit_data(params, model_constants, acf, weights):
 
     fitted_params = params
-    # model = compute_model_and_derivatives(model_constants, **fitted_params)
-    # y_yp = (acf[:,:,np.newaxis,:] - model['model'])[...,np.newaxis]
-    # chi_2 = compute_chi2(y_yp, weights)
 
     shape = (acf.shape[0], acf.shape[1], fitted_params['V'].shape[2], 1)
-    lm_step = np.ones(shape) * 1e-4
-    print(lm_step.shape)
+    lm_step = np.ones(shape) * 1e-2
 
-    for i in range(50):
-        lm_step = levenburg_marquardt_update(acf, model_constants, weights, fitted_params, lm_step)
-        #model = compute_model_and_derivatives(model_constants, **fitted_params)
+    converged = np.full(shape, False)
+    diverged = np.full(shape, False)
+    i = 0
+    while (i<30) and not np.all(converged | diverged):
+        print("Running step: ", i)
+        lm_step = levenburg_marquardt_update(acf, model_constants, weights, fitted_params, lm_step, converged, diverged)
 
-        # h_gn = calculate_gauss_newton_update(acf, model, weights)
-        #print(lm_step[0,0,0])
+        print('p0', fitted_params['p0'][1,20,:,0])
+        print('W', fitted_params['W'][1,20,:,0])
+        print('V', fitted_params['V'][1,20,:,0])
+        print('fit_status', (converged | diverged)[1,20,:,0])
 
-        print('p0', fitted_params['p0'][0,0,:,0])
-        print('W', fitted_params['W'][0,0,:,0])
-        print('V', fitted_params['V'][0,0,:,0])
-
-        # fitted_params['p0'] = fitted_params['p0'] + h_gn[:,:,:,0]
-        # fitted_params['W'] = fitted_params['W'] + h_gn[:,:,:,1]
-        # fitted_params['V'] = fitted_params['V'] + h_gn[:,:,:,2]
+        i += 1
 
     sys.exit(1)
     return fitted_params
