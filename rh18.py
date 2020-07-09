@@ -1,6 +1,6 @@
 import numpy as np
 import rawacf_dmap_read as rdr
-from data_fitting import fit_data
+import data_fitting
 import sys
 
 def determine_noise(pwr0):
@@ -60,7 +60,6 @@ def find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags):
     x = blanked_1 == samples_for_lags[...,np.newaxis]
     y = blanked_2 == samples_for_lags[...,np.newaxis]
 
-
     blanking_mask = np.any(np.logical_or(x,y), axis=-1)
 
     return blanking_mask
@@ -91,30 +90,18 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
 
     tmp = np.sqrt(pwr0[:,np.newaxis,np.newaxis,:,np.newaxis]) * affected_pwr
     clutter_term12 = np.einsum('...klm->...l', tmp)
-    clutter_term3 = np.einsum('...kl,...lk->...k', affected_pwr[:,:,0,:,:], np.einsum('...lm->...ml',affected_pwr[:,:,1,:,:]))
+
+
+    affected_pwr = affected_pwr[...,np.newaxis]
+    clutter_term3 = np.einsum('...ijk,...ikm->...i', affected_pwr[:,:,0], np.einsum('...lm->...ml',affected_pwr[:,:,1]))
+
 
     clutter = clutter_term12 + clutter_term3
 
     return clutter
 
-    # pwr0_reshape = np.repeat(tmp_pwr[:,np.newaxis,np.newaxis,np.newaxis,:], tmp_pwr.shape[-1], axis=3)
-    # pwr0_reshape = np.repeat(pwr0_reshape, )
-    # print(pwr0_reshape.shape, filtered_ranges.shape)
-
-
-    # affected_pwr = np.zeros(pwr0_reshape.shape)
-
-    # blah = pwr0_reshape[filtered_ranges[np.newaxis,...]]
-    # print(blah.shape)
-    # print(blah[0,0,0,0,0,0,0,100,:])
-    # affected_pwr += pwr0_reshape[...,0:-1,0:-1][filtered_ranges[np.newaxis,...]]
-
-
-    # print(affected_pwr)
-
-
-
-
+    # ranges_per_tau = mpinc / smsep
+    # num_lags = samples_for_lags.shape[0]
     # cri = []
     # for i in range(num_lags):
     #     lag_ranges = []
@@ -139,70 +126,31 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
 
 
     #         if r1.size > 0:
-    #             term1 = np.sum(np.sqrt(pwr0[:,j] * pwr0[:,r1]),axis=1)
+    #             term1 = np.sum(np.sqrt(pwr0[:,j][...,np.newaxis] * pwr0[:,r1]),axis=1)
+
     #         else:
     #             term1 = np.zeros(pwr0.shape[0])
 
     #         if r2.size > 0:
-    #             term2 = np.sum(np.sqrt(pwr0[:,j] * pwr0[:,r2]),axis=1)
+    #             term2 = np.sum(np.sqrt(pwr0[:,j][...,np.newaxis] * pwr0[:,r2]),axis=1)
     #         else:
     #             term2 = np.zeros(pwr0.shape[0])
 
     #         if r1.size > 0 and r2.size > 0:
-    #             term3 = np.einsum('ij,ik->i', pwr0[:,r1], pwr0[:,r2])
+    #             term3 = np.einsum('ij,ik->i', np.sqrt(pwr0[:,r1]), np.sqrt(pwr0[:,r2]))
     #         else:
     #             term3 = np.zeros(pwr0.shape[0])
 
-    #         cri.append(term1 + term2 + term3)
-
-    # print(cri[1])
-
-
-
-            #lag_ranges.append((r1,r2))
+    #         c = term1 + term2 + term3
+    #         lag_ranges.append(c)
+    #     cri.append(lag_ranges)
 
 
 
-        #ranges_for_lags.append(lag_ranges)
+    # x = np.array(cri)
+    # print(x[:,1,0])
+    # print(clutter[0,:,1])
 
-    #print(ranges_for_lags)
-
-
-
-
-
-
-    #ranges = np.repeat(ranges[np.newaxis,np.newaxis,np.newaxis,:], )
-    #print(ppr[np.newaxis,np.newaxis,...] <= samples_for_lags)
-    # interfering_pwr = pwr0[:,np.newaxis,np.newaxis,np.newaxis,:]
-    # interfering_pwr = np.repeat(interfering_pwr, num_lags, axis=1)
-    # interfering_pwr = np.repeat(interfering_pwr, 2, axis=2)
-    # interfering_pwr = np.repeat(interfering_pwr, num_pulses, axis=3)
-
-    # interfering_pwr[:,ppr[np.newaxis,np.newaxis,...] <= samples_for_lags] = 0
-
-    # print(interfering_pwr[0,0,0,:,0])
-    # samples_for_lags[ppr[np.newaxis,np.newaxis,...] <= samples_for_lags] = 0
-
-    # print(samples_for_lags[0,0,:,0])
-
-
-
-
-
-    #a = (ptab[:,np.newaxis] * ranges_per_tau) <= samples
-    #print((ptab[:,np.newaxis] * ranges_per_tau))
-    #print(samples)
-    # truth = (samples[] >= (pulses_by_ranges * ranges_per_tau))
-    # p1 = np.where((samples >= (pulses_by_ranges * ranges_per_tau)))[1]
-
-    #print(p1)
-    #lags_pulse_idx = np.searchsorted(ptab, lag_pairs)
-
-    # p1
-    # s2 = samples[lags_pulse_idx]
-
-    # print(s1.shape, s2.shape)
 
 
 
@@ -262,9 +210,45 @@ def calculate_weights(num_records, num_range_gates, num_velocity_models, num_lag
 
     return {'real' : weights_real, 'imag' : weights_imag}
 
+def compute_model_and_derivatives(params, **kwargs):
+
+    p0 = params['p0']['values']
+    W = params['W']['values']
+    V = params['V']['values']
+
+    model_constant_W = kwargs['W']
+    model_constant_V = kwargs['V']
+
+    def calculate_model():
+        model = p0 * np.exp(model_constant_W * W) * np.exp(model_constant_V * V)
+        return model
+
+    model = calculate_model()
+    J = np.repeat(model[:,:,:,:,np.newaxis], 3, axis=4)
+
+    def compute_J():
+        J[:,:,:,:,0] /= p0
+        J[:,:,:,:,1] *= model_constant_W
+        J[:,:,:,:,2] *= model_constant_V
+
+        return J
+
+    model_dict = {}
+    model_dict['model'] = np.concatenate((model.real, model.imag), axis=-1)
+
+    J_model = compute_J()
+    J_model = np.concatenate((J_model.real, J_model.imag), axis=-2)
+    model_dict['J'] = J_model
+
+    return model_dict
+
 def fit_all_records(records_data):
     num_velocity_models = 30
     step = 10
+
+    params = {'p0': {'values' : None, 'min' : 0.0001, 'max' : None},
+              'W': {'values' : None, 'min' : -200.0, 'max' : None},
+              'V': {'values' : None, 'min' : None, 'max' : None}}
 
     for k,v in records_data.items():
         data_for_fitting = v['split_data']
@@ -308,7 +292,7 @@ def fit_all_records(records_data):
         initial_p0 = pwr0[:,:,np.newaxis,np.newaxis] * 2
 
         total_records = len(v['record_nums'])
-        consistent_shape = (total_records, num_range_gates, num_velocity_models,1)
+        consistent_shape = (total_records, num_range_gates, num_velocity_models, 1)
         reshaper = np.zeros(consistent_shape)
 
         initial_V = initial_V + reshaper
@@ -316,8 +300,8 @@ def fit_all_records(records_data):
         initial_p0 = initial_p0 + reshaper
 
 
-        even_chunks = total_records // 20
-        remainder = total_records - (even_chunks * 20)
+        even_chunks = total_records // step
+        remainder = total_records - (even_chunks * step)
 
         fits = []
         def do_fits(start, stop):
@@ -326,26 +310,40 @@ def fit_all_records(records_data):
             V_i = initial_V[start:stop,...]
             p0_i = initial_p0[start:stop,...]
 
+            V_upper_bound = np.repeat(initial_V[start:stop,:,-1,np.newaxis], num_velocity_models, axis=2)
+            V_lower_bound = np.repeat(initial_V[start:stop,:,0,np.newaxis], num_velocity_models, axis=2)
+
+            params['p0']['values'] = p0_i
+            params['W']['values'] = W_i
+            params['V']['values'] = V_i
+
+            params['V']['max'] = V_upper_bound
+            params['V']['min'] = V_lower_bound
+
+
             W_constant_i = model_constants['W'][start:stop,...]
             V_constant_i = model_constants['V'][start:stop,...]
 
-            model_params = {'p0' : p0_i, 'W' : W_i, 'V' : V_i}
-            model_constants_i = {'W' : model_constants['W'][start:stop,...],
-                                 'V' : model_constants['V'][start:stop,...]}
+
+            model_constants_i = {'W' : W_constant_i,
+                                 'V' : V_constant_i}
+            model_dict = {'model_fn' : compute_model_and_derivatives, 'args' : model_constants_i}
 
             weights = fo_weights[start:stop,...]
 
             acf_i = acf[start:stop,...]
 
-            fits.append(fit_data(model_params, model_constants_i, acf_i, weights))
+            lm_step_shape = (step, num_range_gates, num_velocity_models, 1)
+
+            fits.append(data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape))
 
 
         if even_chunks > 0:
             for i in range(even_chunks-1):
-                do_fits(i*20,(i+1)*20)
+                do_fits(i*step,(i+1)*step)
 
         if remainder:
-            do_fits(even_chunks*20, total_records)
+            do_fits(even_chunks*step, total_records)
 
         fits = np.array(fits).reshape(-1,*fits.shape[2:])
         records_data[k]['fitted_data'] = fits
