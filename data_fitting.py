@@ -153,7 +153,7 @@ class LMFit(object):
         # and will never converge.
         tmp_params = copy.copy(params_dict)
         for i, key in enumerate(tmp_params.keys()):
-            tmp_params[key] = {'values' : params_dict[key]['values'] + h_lm[...,i]}
+            tmp_params[key] = {'values' : params_dict[key]['values'] + h_lm[...,i,:]}
 
             if params_dict[key]['min'] is not None:
                 d_min = tmp_params[key]['values'] < params_dict[key]['min']
@@ -173,7 +173,6 @@ class LMFit(object):
                     tmp_params[key]['values'][d_max] = params_dict[key]['max'][d_max]
                 else:
                     tmp_params[key]['values'][d_max] = params_dict[key]['max']
-
 
                 self.diverged[d_max] = True
 
@@ -196,7 +195,7 @@ class LMFit(object):
                                         (Einsum.matmul(lm_Jt_w_J_diag, h_lm) + Jt_w_yyp))
         rho_denominator = Einsum.reduce_dimensions(rho_denominator)
 
-        rho = rho_numerator/rho_denominator
+        rho = rho_numerator / rho_denominator
 
         # When fitting stops, this will stop div by zero later.
         rho[fit_mask] = 1.0
@@ -206,14 +205,14 @@ class LMFit(object):
 
 
         # using 4.1.1 method #1 for the update
-        a = np.maximum(self.lm_step/L_decrease, LMFit.L_min)
+        a = np.maximum(self.lm_step / LMFit.L_decrease, LMFit.L_min)
         a[rho<=LMFit.epsilon_4] = 0.0
 
-        b = np.minimum(self.lm_step*L_increase, LMFit.L_max)
+        b = np.minimum(self.lm_step * LMFit.L_increase, LMFit.L_max)
         b[rho>LMFit.epsilon_4] = 0.0
 
         self.lm_step = a + b
-        rho_mask = (rho>LMFit.epsilon_4) & fit_mask_inv
+        rho_mask = (rho > LMFit.epsilon_4) & fit_mask_inv
 
         for i, key in enumerate(params_dict.keys()):
             params_dict[key]['values'][rho_mask] = tmp_params[key]['values'][rho_mask]
@@ -228,12 +227,12 @@ class LMFit(object):
 
         convergence_1 = np.abs(Jt_w_yyp).max(axis=3) < LMFit.epsilon_1
 
-        convergence_2 = np.abs(h_lm/rho[...,np.newaxis,:]).max(axis=3) < LMFit.epsilon_2
+        convergence_2 = np.abs(h_lm / rho[...,np.newaxis,:]).max(axis=3) < LMFit.epsilon_2
 
         m = model_new['model'].shape[-1]
         n = model_new['J'].shape[-1]
 
-        convergence_3 = (chi_2_new/(m - n + 1)) < LMFit.epsilon_3
+        convergence_3 = (chi_2_new / (m - n + 1)) < LMFit.epsilon_3
 
         self.converged |= convergence_1 | convergence_2 | convergence_3
 
