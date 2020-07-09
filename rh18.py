@@ -253,20 +253,26 @@ def fit_all_records(records_data):
     for k,v in records_data.items():
         data_for_fitting = v['split_data']
 
+        transmit_freq = np.array(data_for_fitting['tfreq'])
+        offset = np.array(data_for_fitting['offset'])
+        num_averages = np.array(data_for_fitting['nave'])
+        pwr0 = np.array(data_for_fitting['pwr0'])
+        acf = np.array(data_for_fitting['acfd'])
+        xcf = np.array(data_for_fitting['xcfd'])
+        lags = np.array(data_for_fitting['ltab'])
+        pulses = np.array(data_for_fitting['ptab'])
+
         mpinc = data_for_fitting['mpinc']
-        lags = data_for_fitting['ltab']
         lagfr = data_for_fitting['lagfr']
-        pwr0 = data_for_fitting['pwr0']
-        pwr0[...] = 1.0
         smsep = data_for_fitting['smsep']
         num_range_gates = data_for_fitting['nrang']
-        pulses = data_for_fitting['ptab']
-        transmit_freq = data_for_fitting['tfreq']
-        transmit_freq[...] = 10500
-        num_averages = data_for_fitting['nave']
         num_lags = data_for_fitting['acfd'].shape[2]
 
-        acf = np.einsum('...ij->...ji', data_for_fitting['acfd'])
+
+        acf = np.einsum('...ij->...ji', acf)
+
+        pwr0[...] = 1.0
+        transmit_freq[...] = 10500
         acf[...,0,:] = 1.0
         acf[...,1,:] = 0.0
 
