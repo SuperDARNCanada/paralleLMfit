@@ -14,19 +14,20 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
     total_signal = (pwr0[:,np.newaxis,:] + noise[:,np.newaxis,np.newaxis] + clutter)
 
     error = total_signal / np.sqrt(nave[:,np.newaxis,np.newaxis])
-    error = np.repeat(error[:,:,np.newaxis,:], blanking_mask.shape[1], axis=2)
+    error = data_fitting.Einsum.transpose(error)
 
-    mask = np.repeat(blanking_mask[np.newaxis,...], error.shape[0], axis=0)
-
-
-    error[mask] = 1e50
-    error = np.einsum('ijkl->ilkj', error)
-    error = error.reshape((error.shape[0], error.shape[1], error.shape[2] * error.shape[3]))
-
-    weights_shape = (error.shape[0], error.shape[1], error.shape[2], error.shape[2])
+    weights_shape = (error.shape[0], error.shape[1], error.shape[2] * 2, error.shape[2] * 2)
     weights = np.zeros(weights_shape)
 
-    diag = np.arange(error.shape[-1])
+    diag = np.arange(weights.shape[-1])
+    diag_r = diag[0:error.shape[2]]
+    diag_i = diag[error.shape[2]:]
+
+    weights[:,:,diag_r,diag_r] = error
+    weights[:,:,diag_i,diag_i] = error
+    weights[:,:,diag,diag][:,blanking_mask] = 1e20
+
+
     weights[:,:,diag,diag] = 1
 
 
@@ -61,6 +62,7 @@ def find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags):
     y = blanked_2 == samples_for_lags[...,np.newaxis]
 
     blanking_mask = np.any(np.logical_or(x,y), axis=-1)
+    blanking_mask = blanking_mask.transpose(2,1,0).reshape(blanking_mask.shape[-1], -1)
 
     return blanking_mask
 
@@ -90,7 +92,6 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
 
     tmp = np.sqrt(pwr0[:,np.newaxis,np.newaxis,:,np.newaxis]) * affected_pwr
     clutter_term12 = np.einsum('...klm->...l', tmp)
-
 
     affected_pwr = affected_pwr[...,np.newaxis]
     clutter_term3 = np.einsum('...ijk,...ikm->...i', affected_pwr[:,:,0], np.einsum('...lm->...ml',affected_pwr[:,:,1]))
@@ -266,7 +267,7 @@ def fit_all_records(records_data):
         lagfr = data_for_fitting['lagfr']
         smsep = data_for_fitting['smsep']
         num_range_gates = data_for_fitting['nrang']
-        num_lags = data_for_fitting['acfd'].shape[2]
+        num_lags = acf.shape[2]
 
 
         acf = np.einsum('...ij->...ji', acf)
@@ -287,6 +288,9 @@ def fit_all_records(records_data):
         pulses_as_samples, samples_for_lags = calculate_samples(num_range_gates, lags, pulses,
                                                                     mpinc, lagfr, smsep)
         blanking_mask = find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags)
+        good_points = np.count_nonzero(blanking_mask == False, axis=-1)
+        good_points = good_points[np.newaxis, :, np.newaxis, np.newaxis]
+
         clutter = estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags,
                                             pwr0, lagfr, smsep)
         fo_weights = first_order_weights(pwr0, noise, clutter, num_averages, blanking_mask)
@@ -341,7 +345,7 @@ def fit_all_records(records_data):
 
             lm_step_shape = (step, num_range_gates, num_velocity_models, 1)
 
-            fits.append(data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape))
+            fits.append(data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape, good_points))
 
 
         if even_chunks > 0:

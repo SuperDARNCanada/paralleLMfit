@@ -218,13 +218,12 @@ class RawacfDmapRead(object):
                     else:
                         continue
 
-            split_data['tfreq'] = np.array(split_data['tfreq'])
-            split_data['offset'] = np.array(split_data['offset'])
-            split_data['nave'] = np.array(split_data['nave'])
-            split_data['pwr0'] = np.array(split_data['pwr0'])
-
-            split_data['acfd'] = np.array(split_data['acfd'])
-            split_data['xcfd'] = np.array(split_data['xcfd'])
+            # split_data['tfreq'] = np.array(split_data['tfreq'])
+            # split_data['offset'] = np.array(split_data['offset'])
+            # split_data['nave'] = np.array(split_data['nave'])
+            # split_data['pwr0'] = np.array(split_data['pwr0'])
+            # split_data['acfd'] = np.array(split_data['acfd'])
+            # split_data['xcfd'] = np.array(split_data['xcfd'])
 
             self.records_data[k]['split_data'] = split_data
 

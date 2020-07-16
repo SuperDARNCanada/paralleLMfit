@@ -48,7 +48,7 @@ class LMFit(object):
     iter_multiplier = 10
 
 
-    def __init__(self, data, model_dict, weights, params_dict, lm_step_shape):
+    def __init__(self, data, model_dict, weights, params_dict, lm_step_shape, num_points=None):
         super(LMFit, self).__init__()
 
         self.lm_step = np.ones(lm_step_shape) * LMFit.L_0
@@ -56,8 +56,13 @@ class LMFit(object):
         self.converged = np.full(lm_step_shape, False)
         self.diverged = np.full(lm_step_shape, False)
 
-        n_params = len(params_dict.keys())
-        n_iters = n_params * LMFit.iter_multiplier
+        if num_points is not None:
+            self.m_points = num_points
+        else:
+            self.m_points = data.shape[-1]
+
+        self.n_params = len(params_dict.keys())
+        n_iters = self.n_params * LMFit.iter_multiplier
 
         i = 0
         while (i<n_iters) and not np.all(self.converged | self.diverged):
@@ -229,10 +234,7 @@ class LMFit(object):
 
         convergence_2 = np.abs(h_lm / rho[...,np.newaxis,:]).max(axis=3) < LMFit.epsilon_2
 
-        m = model_new['model'].shape[-1]
-        n = model_new['J'].shape[-1]
-
-        convergence_3 = (chi_2_new / (m - n + 1)) < LMFit.epsilon_3
+        convergence_3 = (chi_2_new / (self.m_points - self.n_params + 1)) < LMFit.epsilon_3
 
         self.converged |= convergence_1 | convergence_2 | convergence_3
 
