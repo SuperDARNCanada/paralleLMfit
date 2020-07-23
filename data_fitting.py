@@ -64,6 +64,7 @@ class LMFit(object):
         self.n_params = len(params_dict.keys())
         n_iters = self.n_params * LMFit.iter_multiplier
 
+        self.cov_mat = None
         i = 0
         while (i<n_iters) and not np.all(self.converged | self.diverged):
 
@@ -76,6 +77,8 @@ class LMFit(object):
             print('fit_status', (self.converged | self.diverged)[0,0,:,0])
 
             i += 1
+
+        self.fitted_params = params_dict
 
 
     def compute_chi2(self, y_yp, weights):
@@ -93,6 +96,7 @@ class LMFit(object):
         chi_2 = Einsum.reduce_dimensions(chi_2)
 
         return chi_2
+
 
     def levenburg_marquardt_iteration(self, data, model_dict, weights, params_dict):
         """
@@ -112,12 +116,6 @@ class LMFit(object):
         """
 
 
-        # Using matrix operations, it's not possible to selectively perform fits. Masks are used
-        # to avoid fitting issues when fits have finished.
-        fit_mask = (self.converged | self.diverged)
-        fit_mask_inv = ~fit_mask
-
-
         model = model_dict['model_fn'](params_dict, **model_dict['args'])
 
         y_yp = (data[...,np.newaxis,:] - model['model'])[...,np.newaxis]
@@ -135,6 +133,11 @@ class LMFit(object):
         lm_Jt_w_J_diag[...,diag,diag] = (self.lm_step * Jt_w_J[...,diag,diag])
 
         grad = Jt_w_J + lm_Jt_w_J_diag
+
+        # Using matrix operations, it's not possible to selectively perform fits. Masks are used
+        # to avoid fitting issues when fits have finished.
+        fit_mask = (self.converged | self.diverged)
+        fit_mask_inv = ~fit_mask
 
         # When fits converge/diverge such that the gradients tend to 0, this stops the matrix
         # from becoming singular.
@@ -237,4 +240,18 @@ class LMFit(object):
         convergence_3 = (chi_2_new / (self.m_points - self.n_params + 1)) < LMFit.epsilon_3
 
         self.converged |= convergence_1 | convergence_2 | convergence_3
+
+
+        # 4.2 eqn 21
+        Jt = Einsum.transpose(model_new['J'])
+        Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
+        Jt_w_J = Einsum.matmul(Jt_w, model_new['J'])
+
+        diag = np.arange(Jt_w_J.shape[-1])
+
+        converged_grad = np.full(Jt_w_J.shape, False)
+        converged_grad[...,diag,diag] = ~self.converged
+        grad[converged_grad] = 1.0
+
+        self.cov_mat = np.linalg.inv(grad)
 

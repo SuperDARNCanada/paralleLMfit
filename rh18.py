@@ -2,7 +2,7 @@ import numpy as np
 import rawacf_dmap_read as rdr
 import data_fitting
 import sys
-
+import time
 def determine_noise(pwr0):
 
     sorted_pwr0 = np.sort(pwr0)
@@ -13,8 +13,11 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
 
     total_signal = (pwr0[:,np.newaxis,:] + noise[:,np.newaxis,np.newaxis] + clutter)
 
-    error = total_signal / np.sqrt(nave[:,np.newaxis,np.newaxis])
+    error = total_signal / np.sqrt(nave[:,np.newaxis,np.newaxis].astype(float))
     error = data_fitting.Einsum.transpose(error)
+
+    # Cut alt lag 0
+    error = error[...,:-1]
 
     weights_shape = (error.shape[0], error.shape[1], error.shape[2] * 2, error.shape[2] * 2)
     weights = np.zeros(weights_shape)
@@ -23,13 +26,11 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
     diag_r = diag[0:error.shape[2]]
     diag_i = diag[error.shape[2]:]
 
-    weights[:,:,diag_r,diag_r] = error
-    weights[:,:,diag_i,diag_i] = error
-    weights[:,:,diag,diag][:,blanking_mask] = 1e20
+    weights[...,diag_r,diag_r] = error
+    weights[...,diag_i,diag_i] = error
 
-
-    weights[:,:,diag,diag] = 1
-
+    weights[...,diag,diag] = 1
+    weights[...,diag,diag][blanking_mask] = 1e20
 
     return weights
 
@@ -37,65 +38,91 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
 def calculate_samples(num_range_gates, ltab, ptab, mpinc, lagfr, smsep):
 
     ranges = np.arange(num_range_gates)
-    pulses_by_ranges = np.repeat(ptab[:,np.newaxis], num_range_gates, axis=1)
+    pulses_by_ranges = np.repeat(ptab[...,np.newaxis], num_range_gates, axis=-1)
 
     ranges_per_tau = mpinc / smsep
+    ranges_per_tau = ranges_per_tau[...,np.newaxis,np.newaxis]
 
     pulses_as_samples = (pulses_by_ranges * ranges_per_tau)
     first_range_in_samps = lagfr/smsep
-    samples = (pulses_by_ranges * ranges_per_tau) + ranges[np.newaxis,:] + first_range_in_samps
+    first_range_in_samps = first_range_in_samps[...,np.newaxis,np.newaxis]
+    samples = (pulses_by_ranges * ranges_per_tau) + ranges[np.newaxis,np.newaxis,:] + first_range_in_samps
 
-    lags = ltab[0:-1,1] - ltab[0:-1,0]
-    lag_pairs = ltab[0:-1, :]
-    lags_pulse_idx = np.searchsorted(ptab, lag_pairs)
+    def searchsorted2d(a,b):
+        """https://stackoverflow.com/questions/40588403/vectorized-searchsorted-numpy"""
+        m,n,o = a.shape
+        max_num = np.maximum(a.max() - a.min(), b.max() - b.min()) + 1
+        r = max_num*np.arange(a.shape[0])[:,np.newaxis,np.newaxis]
+        p = np.searchsorted( (a+r).ravel(), (b+r).ravel() ).reshape(b.shape)
+        return p - n*(np.arange(m)[:,np.newaxis, np.newaxis])
 
-    samples_for_lags = samples[lags_pulse_idx]
+    lags_pulse_idx = searchsorted2d(ptab[...,np.newaxis], ltab)
+    lags_pulse_idx = np.resize(lags_pulse_idx[...,np.newaxis], (*lags_pulse_idx.shape, num_range_gates))
+
+    samples_for_lags = np.take(samples[...,np.newaxis,:,:], lags_pulse_idx)
 
     return pulses_as_samples, samples_for_lags
 
-def find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags):
+def create_blanking_mask(num_range_gates, pulses_as_samples, samples_for_lags, data_mask, num_averages):
 
-    blanked_1 = pulses_as_samples.T[np.newaxis,np.newaxis,...]
+    # first do tx blanked lags
+    blanked_1 = data_fitting.Einsum.transpose(pulses_as_samples)[...,np.newaxis,np.newaxis,:,:]
     blanked_2 = blanked_1 + 1
 
     x = blanked_1 == samples_for_lags[...,np.newaxis]
     y = blanked_2 == samples_for_lags[...,np.newaxis]
 
-    blanking_mask = np.any(np.logical_or(x,y), axis=-1)
-    blanking_mask = blanking_mask.transpose(2,1,0).reshape(blanking_mask.shape[-1], -1)
+    blanking_mask = np.any(x | y, axis=-1)
+
+    # Blank where data does not exist
+    blanking_mask[~data_mask] = True
+    blanking_mask[num_averages<=0] = True
+
+    blanking_mask = blanking_mask.transpose(0,3,2,1)
+
+    # cut alt lag 0
+    blanking_mask = blanking_mask[...,:-1]
+    blanking_mask = blanking_mask.reshape(blanking_mask.shape[0], blanking_mask.shape[1],
+                                            blanking_mask.shape[2] * blanking_mask.shape[3])
 
     return blanking_mask
 
 
 
-def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags, pwr0, lagfr, smsep):
+def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags, pwr0, lagfr, smsep, data_mask):
 
-    pulses_as_samples = pulses_as_samples.T[np.newaxis,np.newaxis,...]
+    pulses_as_samples = data_fitting.Einsum.transpose(pulses_as_samples)[...,np.newaxis,np.newaxis,:,:]
+    samples_for_lags = samples_for_lags[...,np.newaxis]
+
     first_range_in_samps = lagfr/smsep
-    affected_ranges = samples_for_lags[...,np.newaxis] - pulses_as_samples - first_range_in_samps
+    affected_ranges = (samples_for_lags -
+                        pulses_as_samples -
+                        first_range_in_samps[:,np.newaxis,np.newaxis,np.newaxis,np.newaxis])
     affected_ranges = affected_ranges.astype(int)
 
     ranges = np.arange(num_range_gates)
-    ranges_reshape = ranges[np.newaxis,np.newaxis,:,np.newaxis]
-    condition = np.logical_and((affected_ranges <= samples_for_lags[...,np.newaxis]),
-                    (np.logical_and((affected_ranges < num_range_gates),
-                    np.logical_and((affected_ranges != ranges_reshape), (affected_ranges >= 0)))))
+    ranges_reshape = ranges[np.newaxis,np.newaxis,np.newaxis,:,np.newaxis]
+    condition = ((affected_ranges <= samples_for_lags) &
+                (affected_ranges < num_range_gates) &
+                (affected_ranges != ranges_reshape) &
+                (affected_ranges >= 0) &
+                data_mask[...,np.newaxis])
 
-    filtered_ranges = np.where(condition, affected_ranges, -1)
 
-    tmp_pwr = np.zeros((pwr0.shape[0], pwr0.shape[1] + 1))
-    tmp_pwr[:,0:-1] += pwr0
+    tmp_pwr = np.resize(pwr0[...,np.newaxis,np.newaxis,:], condition.shape)
+    tmp_pwr[~condition] = 0.0
 
-    affected_pwr = tmp_pwr[:,filtered_ranges.flatten()]
-    affected_pwr = affected_pwr.reshape((affected_pwr.shape[0],) + filtered_ranges.shape)
-    affected_pwr = np.sqrt(affected_pwr)
+    affected_pwr = np.sqrt(tmp_pwr)
 
-    tmp = np.sqrt(pwr0[:,np.newaxis,np.newaxis,:,np.newaxis]) * affected_pwr
+    tmp = np.sqrt(pwr0[...,np.newaxis,np.newaxis,:,np.newaxis]) * affected_pwr
     clutter_term12 = np.einsum('...klm->...l', tmp)
 
-    affected_pwr = affected_pwr[...,np.newaxis]
-    clutter_term3 = np.einsum('...ijk,...ikm->...i', affected_pwr[:,:,0], np.einsum('...lm->...ml',affected_pwr[:,:,1]))
 
+    affected_pwr = affected_pwr[...,np.newaxis]
+
+    pwr_1 = affected_pwr[:,:,0]
+    pwr_2 = data_fitting.Einsum.transpose(affected_pwr[:,:,1])
+    clutter_term3 = np.einsum('...ijk,...ikm->...i', pwr_1, pwr_2)
 
     clutter = clutter_term12 + clutter_term3
 
@@ -157,11 +184,12 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
 
 
 def calculate_t(lags, mpinc):
-    lags = lags[0:-1,1] - lags[0:-1,0]
+    # cut alt lag 0
+    lags = lags[:,:-1,1] - lags[:,:-1,0]
 
     # Need braces to enforce data type. Lags is short and will overflow.
-    t = lags * (mpinc * 1e-6)
-    t = t[np.newaxis, np.newaxis,:]
+    t = lags * (mpinc[...,np.newaxis] * 1e-6)
+    t = t[:, np.newaxis,:]
 
     return t
 
@@ -173,6 +201,7 @@ def calculate_wavelength(tfreq):
     return wavelength
 
 def calculate_constants(wavelength, t):
+
     W_constant = (-1 * 2 * np.pi * t)/wavelength
     W_constant = W_constant[:,:,np.newaxis,:]
 
@@ -189,7 +218,7 @@ def calculate_initial_W(array_shape):
     return W
 
 def calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc):
-    nyquist_v = wavelength/(4.0 * mpinc * 1e-6)
+    nyquist_v = wavelength/(4.0 * mpinc[...,np.newaxis,np.newaxis] * 1e-6)
 
     step = 2 * nyquist_v / num_velocity_models
     tmp = np.arange(num_velocity_models, dtype=np.float64)[np.newaxis,np.newaxis,:]
@@ -200,16 +229,6 @@ def calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc)
 
     return nyquist_v_steps
 
-
-def calculate_weights(num_records, num_range_gates, num_velocity_models, num_lags):
-
-    weights_real = np.zeros((num_records, num_range_gates, num_velocity_models, num_lags, num_lags))
-    weights_real[...,np.arange(num_lags),np.arange(num_lags)] = 1
-
-    weights_imag = np.zeros((num_records, num_range_gates, num_velocity_models, num_lags, num_lags))
-    weights_imag[...,np.arange(num_lags),np.arange(num_lags)] = 1
-
-    return {'real' : weights_real, 'imag' : weights_imag}
 
 def compute_model_and_derivatives(params, **kwargs):
 
@@ -225,7 +244,7 @@ def compute_model_and_derivatives(params, **kwargs):
         return model
 
     model = calculate_model()
-    J = np.repeat(model[:,:,:,:,np.newaxis], 3, axis=4)
+    J = np.repeat(model[...,np.newaxis], 3, axis=-1)
 
     def compute_J():
         J[:,:,:,:,0] /= p0
@@ -235,7 +254,9 @@ def compute_model_and_derivatives(params, **kwargs):
         return J
 
     model_dict = {}
-    model_dict['model'] = np.concatenate((model.real, model.imag), axis=-1)
+    model = np.concatenate((model.real, model.imag), axis=-1)
+    model_dict['model'] = model
+
 
     J_model = compute_J()
     J_model = np.concatenate((J_model.real, J_model.imag), axis=-2)
@@ -251,112 +272,136 @@ def fit_all_records(records_data):
               'W': {'values' : None, 'min' : -200.0, 'max' : None},
               'V': {'values' : None, 'min' : None, 'max' : None}}
 
-    for k,v in records_data.items():
-        data_for_fitting = v['split_data']
 
-        transmit_freq = np.array(data_for_fitting['tfreq'])
-        offset = np.array(data_for_fitting['offset'])
-        num_averages = np.array(data_for_fitting['nave'])
-        pwr0 = np.array(data_for_fitting['pwr0'])
-        acf = np.array(data_for_fitting['acfd'])
-        xcf = np.array(data_for_fitting['xcfd'])
-        lags = np.array(data_for_fitting['ltab'])
-        pulses = np.array(data_for_fitting['ptab'])
+    transmit_freq = records_data[b'tfreq']
+    offset = records_data[b'offset']
+    num_averages = records_data[b'nave']
+    pwr0 = records_data[b'pwr0']
+    acf = records_data[b'acfd']
+    xcf = records_data[b'xcfd']
+    lags = records_data[b'ltab']
+    pulses = records_data[b'ptab']
+    slist = records_data[b'slist']
 
-        mpinc = data_for_fitting['mpinc']
-        lagfr = data_for_fitting['lagfr']
-        smsep = data_for_fitting['smsep']
-        num_range_gates = data_for_fitting['nrang']
-        num_lags = acf.shape[2]
+    mpinc = records_data[b'mpinc']
+    lagfr = records_data[b'lagfr']
+    smsep = records_data[b'smsep']
+    num_range_gates = acf.shape[1]
 
+    data_mask = records_data[b"data_mask"]
 
-        acf = np.einsum('...ij->...ji', acf)
+    acf = data_fitting.Einsum.transpose(acf)
 
-        pwr0[...] = 1.0
-        transmit_freq[...] = 10500
-        acf[...,0,:] = 1.0
-        acf[...,1,:] = 0.0
+    pwr0[...] = 1.0
+    transmit_freq[...] = 10500
+    acf[...,0,:] = 1.0
+    acf[...,1,:] = 0.0
 
-        acf = acf.reshape((acf.shape[0], acf.shape[1], acf.shape[2] * acf.shape[3]))
-        t = calculate_t(lags, mpinc)
-        wavelength = calculate_wavelength(transmit_freq)
-
-
-        noise = determine_noise(pwr0)
+    acf = acf.reshape((acf.shape[0], acf.shape[1], acf.shape[2] * acf.shape[3]))
+    t = calculate_t(lags, mpinc)
+    wavelength = calculate_wavelength(transmit_freq)
 
 
-        pulses_as_samples, samples_for_lags = calculate_samples(num_range_gates, lags, pulses,
-                                                                    mpinc, lagfr, smsep)
-        blanking_mask = find_tx_blanked_lags(num_range_gates, pulses_as_samples, samples_for_lags)
-        good_points = np.count_nonzero(blanking_mask == False, axis=-1)
-        good_points = good_points[np.newaxis, :, np.newaxis, np.newaxis]
-
-        clutter = estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags,
-                                            pwr0, lagfr, smsep)
-        fo_weights = first_order_weights(pwr0, noise, clutter, num_averages, blanking_mask)
-
-        model_constants = calculate_constants(wavelength, t)
-
-        initial_V = calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc)
-        initial_W = calculate_initial_W(initial_V.shape)
-        initial_p0 = pwr0[:,:,np.newaxis,np.newaxis] * 2
-
-        total_records = len(v['record_nums'])
-        consistent_shape = (total_records, num_range_gates, num_velocity_models, 1)
-        reshaper = np.zeros(consistent_shape)
-
-        initial_V = initial_V + reshaper
-        initial_W = initial_W + reshaper
-        initial_p0 = initial_p0 + reshaper
+    noise = determine_noise(pwr0)
 
 
-        even_chunks = total_records // step
-        remainder = total_records - (even_chunks * step)
+    pulses_as_samples, samples_for_lags = calculate_samples(num_range_gates, lags, pulses,
+                                                                mpinc, lagfr, smsep)
+    blanking_mask = create_blanking_mask(num_range_gates, pulses_as_samples, samples_for_lags,
+                                            data_mask, num_averages)
+    good_points = np.count_nonzero(blanking_mask == False, axis=-1)
+    good_points = good_points[...,np.newaxis,np.newaxis]
 
-        fits = []
-        def do_fits(start, stop):
+    clutter = estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags,
+                                        pwr0, lagfr, smsep, data_mask)
+    fo_weights = first_order_weights(pwr0, noise, clutter, num_averages, blanking_mask)
 
-            W_i = initial_W[start:stop,...]
-            V_i = initial_V[start:stop,...]
-            p0_i = initial_p0[start:stop,...]
+    model_constants = calculate_constants(wavelength, t)
 
-            V_upper_bound = np.repeat(initial_V[start:stop,:,-1,np.newaxis], num_velocity_models, axis=2)
-            V_lower_bound = np.repeat(initial_V[start:stop,:,0,np.newaxis], num_velocity_models, axis=2)
+    initial_V = calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc)
+    initial_W = calculate_initial_W(initial_V.shape)
+    initial_p0 = pwr0[...,np.newaxis,np.newaxis] * 2
 
-            params['p0']['values'] = p0_i
-            params['W']['values'] = W_i
-            params['V']['values'] = V_i
+    total_records = pwr0.shape[0]
+    consistent_shape = (total_records, num_range_gates, num_velocity_models, 1)
+    reshaper = np.zeros(consistent_shape)
 
-            params['V']['max'] = V_upper_bound
-            params['V']['min'] = V_lower_bound
+    initial_V = initial_V + reshaper
+    initial_W = initial_W + reshaper
+    initial_p0 = initial_p0 + reshaper
+
+    even_chunks = total_records // step
+    remainder = total_records - (even_chunks * step)
+
+    fits = []
+    def do_fits(start, stop):
+
+        W_i = initial_W[start:stop,...]
+        V_i = initial_V[start:stop,...]
+        p0_i = initial_p0[start:stop,...]
+
+        V_upper_bound = np.repeat(initial_V[start:stop,:,-1,np.newaxis], num_velocity_models, axis=2)
+        V_lower_bound = np.repeat(initial_V[start:stop,:,0,np.newaxis], num_velocity_models, axis=2)
+
+        params['p0']['values'] = p0_i
+        params['W']['values'] = W_i
+        params['V']['values'] = V_i
+
+        params['V']['max'] = V_upper_bound
+        params['V']['min'] = V_lower_bound
 
 
-            W_constant_i = model_constants['W'][start:stop,...]
-            V_constant_i = model_constants['V'][start:stop,...]
+        W_constant_i = model_constants['W'][start:stop,...]
+        V_constant_i = model_constants['V'][start:stop,...]
+
+        model_constants_i = {'W' : W_constant_i,
+                             'V' : V_constant_i}
+        model_dict = {'model_fn' : compute_model_and_derivatives, 'args' : model_constants_i}
+
+        weights = fo_weights[start:stop,...]
+
+        acf_i = acf[start:stop,...]
+
+        lm_step_shape = (step, num_range_gates, num_velocity_models, 1)
+
+        gp = good_points[start:stop,...]
+        fits.append(data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape, gp))
 
 
-            model_constants_i = {'W' : W_constant_i,
-                                 'V' : V_constant_i}
-            model_dict = {'model_fn' : compute_model_and_derivatives, 'args' : model_constants_i}
+    if even_chunks > 0:
+        for i in range(even_chunks-1):
+            do_fits(i*step,(i+1)*step)
 
-            weights = fo_weights[start:stop,...]
+    if remainder:
+        do_fits(even_chunks*step, total_records)
 
-            acf_i = acf[start:stop,...]
+    tmp = ([], [], [], [], [])
 
-            lm_step_shape = (step, num_range_gates, num_velocity_models, 1)
+    for f in fits:
+        tmp[0].append(f.params['p0'])
+        tmp[1].append(f.params['W'])
+        tmp[2].append(f.params['V'])
+        tmp[3].append(f.cov_mat)
+        tmp[4].append(f.converged)
 
-            fits.append(data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape, good_points))
+    fitted_data = {'p0' : np.vstack(tmp[0]),
+                   'W' : np.vstack(tmp[1]),
+                   'V' : np.vstack(tmp[2]),
+                   'cov_mat' : np.vstack(tmp[3]),
+                   'converged' : np.vstack(tmp[4])}
 
 
-        if even_chunks > 0:
-            for i in range(even_chunks-1):
-                do_fits(i*step,(i+1)*step)
+    records_data[k]['fitted_data'] = fitted_data
 
-        if remainder:
-            do_fits(even_chunks*step, total_records)
+# def write_to_file(records_data):
 
-        fits = np.array(fits).reshape(-1,*fits.shape[2:])
-        records_data[k]['fitted_data'] = fits
+
+#     max_nrang = 0
+#     total_records = 0
+#     for k,v in records_data.items():
+#         max_nrang = max(max_nrang, v['split_data']['nrang'])
+#         total_records += len(v['record_nums'].keys())
+
 
 
 if __name__ == '__main__':
@@ -365,6 +410,8 @@ if __name__ == '__main__':
     records_data = data_read.get_parsed_data()
 
     fit_all_records(records_data)
+
+
 
 
 

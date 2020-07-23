@@ -40,10 +40,10 @@ class RawacfDmapRead(object):
 
         self.records_data = {}
 
-        self.group_records_by_size()
+        self.total_records = self.group_records_by_size()
         self.parse_raw_records()
 
-        self.split_data_from_raw_records()
+        self.parsed_data = self.split_data_from_raw_records()
 
 
     def group_records_by_size(self):
@@ -55,13 +55,14 @@ class RawacfDmapRead(object):
             size = struct.unpack_from('i', self.data, buffer_offset + BYTES_PER_NUMPY_TYPE['i4'])[0]
 
             if size not in self.records_data:
-                self.records_data[size] = {'record_nums' : [], 'start_offset' : []}
+                self.records_data[size] = {'record_nums' : {}}
 
-            self.records_data[size]['record_nums'].append(counter)
-            self.records_data[size]['start_offset'].append(buffer_offset)
+            self.records_data[size]['record_nums'][counter] = {'start_offset' : buffer_offset}
 
             buffer_offset += size
             counter += 1
+
+        return counter
 
 
     def build_compound_type_for_record(self, start_offset):
@@ -142,92 +143,161 @@ class RawacfDmapRead(object):
 
     def parse_raw_records(self):
         for k,v in self.records_data.items():
-            offset = v['start_offset'][0]
+            rec_nums = list(v['record_nums'].keys())
 
+            offset = v['record_nums'][rec_nums[0]]['start_offset']
             type_for_record = self.build_compound_type_for_record(offset)
-
-            raw_records = []
-            for off in v['start_offset']:
+            for r in rec_nums:
                 self.f.seek(0)
-                raw_records.append(np.fromfile(self.f, dtype=type_for_record, count=1, offset=off))
+                off = v['record_nums'][r]['start_offset']
+                raw_rec = np.fromfile(self.f, dtype=type_for_record, count=1, offset=off)
+                v['record_nums'][r]['raw_record'] = raw_rec
 
-            self.records_data[k]['raw_records'] = raw_records
+
+            #self.records_data[k]['raw_records'] = raw_records
 
 
     def split_data_from_raw_records(self):
 
+        max_nrang = 0
+        groups = {}
+
+        k = list(self.records_data.keys())[0]
+        scalers = self.records_data[k]['record_nums'][0]['raw_record']['scalers']
+        arrays = self.records_data[k]['record_nums'][0]['raw_record']['arrays']
+
+
+        for scaler in scalers[0]:
+            groups[scaler[0]] = [None] * self.total_records
+
+        for array in arrays[0]:
+            groups[array[0]] = [None] * self.total_records
+
         for k,v in self.records_data.items():
-            split_data= {'tfreq':[],
-                             'offset' : [],
-                             'mpinc' : None,
-                             'mppul' : None,
-                             'mplgs' : None,
-                             'rsep' : None,
-                             'nrang' : None,
-                             'txpl' : None,
-                             'smsep' : None,
-                             'ptab' : [],
-                             'ltab' : None,
-                             'slist' : None,
-                             'nave' : [],
-                             'pwr0' : [],
-                             'acfd' : [],
-                             'xcfd' : []}
 
+            for i, r in v['record_nums'].items():
+                record = r['raw_record']
 
-            for record in v['raw_records']:
                 for scaler in record['scalers'][0]:
-                    if scaler[0] == b"tfreq":
-                        split_data['tfreq'].append(scaler[-1])
-                    elif scaler[0] == b"offset":
-                        split_data['offset'].append(scaler[-1])
-                    elif scaler[0] == b"nave":
-                        split_data['nave'].append(scaler[-1])
-                    elif scaler[0] == b"mpinc":
-                        split_data['mpinc'] = scaler[-1]
-                    elif scaler[0] == b"mppul":
-                        split_data['mppul'] = scaler[-1]
-                    elif scaler[0] == b"mplgs":
-                        split_data['mplgs'] = scaler[-1]
-                    elif scaler[0] == b"rsep":
-                        split_data['rsep'] = scaler[-1]
-                    elif scaler[0] == b"nrang":
-                        split_data['nrang'] = scaler[-1]
-                    elif scaler[0] == b"txpl":
-                        split_data['txpl'] = scaler[-1]
-                    elif scaler[0] == b"smsep":
-                        split_data['smsep'] = scaler[-1]
-                    elif scaler[0] == b"lagfr":
-                        split_data['lagfr'] = scaler[-1]
-                    else:
-                        continue
+                    groups[scaler[0]][i] = scaler[-1]
 
                 for array in record['arrays'][0]:
-                    if array[0] == b"ptab":
-                        split_data['ptab'] = array[-1]
-                    elif array[0] == b"ltab":
-                        split_data['ltab'] = array[-1]
-                    elif array[0] == b"slist":
-                        split_data['slist'] = array[-1]
-                    elif array[0] == b"pwr0":
-                        split_data['pwr0'].append(array[-1])
-                    elif array[0] == b"acfd":
-                        split_data['acfd'].append(array[-1])
-                    elif array[0] == b"xcfd":
-                        split_data['xcfd'].append(array[-1])
-                    else:
-                        continue
+                    groups[array[0]][i] = array[-1]
 
-            # split_data['tfreq'] = np.array(split_data['tfreq'])
-            # split_data['offset'] = np.array(split_data['offset'])
-            # split_data['nave'] = np.array(split_data['nave'])
-            # split_data['pwr0'] = np.array(split_data['pwr0'])
-            # split_data['acfd'] = np.array(split_data['acfd'])
-            # split_data['xcfd'] = np.array(split_data['xcfd'])
+        for scaler in record['scalers'][0]:
+            groups[scaler[0]] = np.array(groups[scaler[0]])
 
-            self.records_data[k]['split_data'] = split_data
+        max_ptab_dim = [self.total_records,0]
+        ptab_type = None
+
+        max_ltab_dim = [self.total_records,0,2]
+        ltab_type = None
+
+        max_slist_dim = [self.total_records,0]
+        slist_type = None
+
+        max_pwr0_dim = [self.total_records,0]
+        pwr0_type = None
+
+        max_acfd_dim = [self.total_records,0,0,2]
+        acfd_type = None
+
+        max_xcfd_dim = [self.total_records,0,0,2]
+        xcfd_type = None
+
+        for array in arrays[0]:
+            name = array[0]
+
+            for arr in groups[name]:
+                if name == b"ptab":
+                    max_ptab_dim[1] = max(max_ptab_dim[1], arr.shape[0])
+                    ptab_type = arr.dtype
+                elif name == b"ltab":
+                    max_ltab_dim[1] = max(max_ltab_dim[1], arr.shape[0])
+                    ltab_type = arr.dtype
+                elif name == b"slist":
+                    max_slist_dim[1] = max(max_slist_dim[1], arr.shape[0])
+                    slist_type = arr.dtype
+                elif name == b"pwr0":
+                    max_pwr0_dim[1] = max(max_pwr0_dim[1], arr.shape[0])
+                    pwr0_type = arr.dtype
+                elif name == b"acfd":
+                    max_acfd_dim[1] = max(max_acfd_dim[1], arr.shape[0])
+                    max_acfd_dim[2] = max(max_acfd_dim[2], arr.shape[1])
+                    acfd_type = arr.dtype
+                elif name == b"xcfd":
+                    max_xcfd_dim[1] = max(max_xcfd_dim[1], arr.shape[0])
+                    max_xcfd_dim[2] = max(max_xcfd_dim[2], arr.shape[1])
+                    xcfd_type = arr.dtype
+                else:
+                    continue
+
+        ptab = np.zeros(max_ptab_dim, dtype=ptab_type) - 1
+        ltab = np.zeros(max_ltab_dim, dtype=ltab_type) - 1
+        ltab_mask = np.full(max_ltab_dim, False, dtype=bool)
+        slist = np.zeros(max_slist_dim, dtype=slist_type)
+        slist_mask = np.full(max_slist_dim, False, dtype=bool)
+        pwr0 = np.zeros(max_pwr0_dim, dtype=pwr0_type)
+        acfd = np.zeros(max_acfd_dim, dtype=acfd_type)
+        xcfd = np.zeros(max_xcfd_dim, dtype=xcfd_type)
+
+
+        for array in arrays[0]:
+            name = array[0]
+
+            for i,arr in enumerate(groups[name]):
+                if name == b"ptab":
+                    ptab_dim = arr.shape[0]
+                    ptab[i,:ptab_dim] = arr
+                elif name == b"ltab":
+                    ltab_dim = arr.shape[0]
+                    ltab[i,:ltab_dim] = arr
+                    # mask the alternate lag 0
+                    ltab_mask[i,:ltab_dim-1] = True
+                elif name == b"slist":
+                    slist_dim = arr.shape[0]
+                    slist[i,arr] = arr
+                    slist_mask[i,arr] = True
+                else:
+                    continue
+
+
+        for array in arrays[0]:
+            name = array[0]
+
+            for i,arr in enumerate(groups[name]):
+                if name == b"pwr0":
+                    pwr0[i, slist_mask[i] == True] = arr
+                elif name == b"acfd":
+                    acfd_dim_2 = arr.shape[1]
+                    acfd[i,slist_mask[i] == True,:acfd_dim_2,:] = arr
+                elif name == b"xcfd":
+                    xcfd_dim_2 = arr.shape[1]
+                    xcfd[i,slist_mask[i] == True,:xcfd_dim_2,:] = arr
+                else:
+                    continue
+
+        groups[b"ptab"] = ptab
+        groups[b"ltab"] = ltab
+        groups[b"slist"] = slist
+        groups[b"pwr0"] = pwr0
+        groups[b"acfd"] = acfd
+        groups[b"xcfd"] = xcfd
+
+        data_mask = np.full(ltab_mask.shape + (slist_mask.shape[-1],), False, dtype=bool)
+
+        ltab_mask = np.resize(ltab_mask[...,np.newaxis], data_mask.shape)
+        slist_mask = np.resize(slist_mask[...,np.newaxis,np.newaxis,:], data_mask.shape)
+
+
+        data_mask |= ltab_mask
+        data_mask &= slist_mask
+
+        groups[b"data_mask"] = data_mask
+
+        return groups
 
     def get_parsed_data(self):
-        return self.records_data
+        return self.parsed_data
 
 
