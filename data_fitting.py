@@ -38,6 +38,7 @@ class LMFit(object):
     epsilon_2 = 1e-3
     epsilon_3 = 1e-1
     epsilon_4 = 1e-1
+    epsilon_5 = 2.e-3
 
     L_0 = 1e-2
     L_increase = 11
@@ -45,7 +46,7 @@ class LMFit(object):
     L_max = 1e7
     L_min = 1e-7
 
-    iter_multiplier = 10
+    iter_multiplier = 30
 
 
     def __init__(self, data, model_dict, weights, params_dict, lm_step_shape, num_points=None):
@@ -54,27 +55,54 @@ class LMFit(object):
         self.lm_step = np.ones(lm_step_shape) * LMFit.L_0
 
         self.converged = np.full(lm_step_shape, False)
-        self.diverged = np.full(lm_step_shape, False)
+
+        # Using matrix operations, it's not possible to selectively perform fits. Masks are used
+        # to avoid fitting issues when fits have finished or failed.
+        self.fit_mask = np.full(lm_step_shape, False)
+
+        self.n_params = len(params_dict.keys())
 
         if num_points is not None:
-            self.m_points = num_points
+            tmp_points = np.resize(num_points, lm_step_shape)
+            self.fit_mask[tmp_points<=0] = True
+
+            tmp_points[tmp_points<=0] = self.n_params
+            self.m_points = tmp_points
         else:
             self.m_points = data.shape[-1]
 
-        self.n_params = len(params_dict.keys())
         n_iters = self.n_params * LMFit.iter_multiplier
 
         self.cov_mat = None
         i = 0
-        while (i<n_iters) and not np.all(self.converged | self.diverged):
+
+        prev_num_stopped_fits = 0
+        while True:
+
+            if i == n_iters:
+                break
 
             print("Running step: ", i)
             self.levenburg_marquardt_iteration(data, model_dict, weights, params_dict)
 
-            print('p0', params_dict['p0']['values'][0,0,:,0])
-            print('W', params_dict['W']['values'][0,0,:,0])
-            print('V', params_dict['V']['values'][0,0,:,0])
-            print('fit_status', (self.converged | self.diverged)[0,0,:,0])
+
+            # print('p0', params_dict['p0']['values'][0,0,:,0])
+            # print('W', params_dict['W']['values'][0,0,:,0])
+            # print('V', params_dict['V']['values'][0,0,:,0])
+
+            # print('fit_status', self.fit_mask[0,0,:,0])
+
+            print('fit_%', (np.count_nonzero(self.fit_mask)/self.fit_mask.size) * 100)
+            print('converge_%', (np.count_nonzero(self.converged)/self.converged.size) * 100)
+            if i == 0:
+                prev_num_stopped_fits = np.count_nonzero(self.fit_mask)
+            else:
+                num_stopped_fits = np.count_nonzero(self.fit_mask)
+                change = 1 - (prev_num_stopped_fits / num_stopped_fits)
+                print("change", change)
+                if change < LMFit.epsilon_5:
+                    break
+                prev_num_stopped_fits = num_stopped_fits
 
             i += 1
 
@@ -134,25 +162,21 @@ class LMFit(object):
 
         grad = Jt_w_J + lm_Jt_w_J_diag
 
-        # Using matrix operations, it's not possible to selectively perform fits. Masks are used
-        # to avoid fitting issues when fits have finished.
-        fit_mask = (self.converged | self.diverged)
-        fit_mask_inv = ~fit_mask
 
         # When fits converge/diverge such that the gradients tend to 0, this stops the matrix
         # from becoming singular.
+
+        invertable = np.linalg.cond(grad) < 1/np.finfo(grad.dtype).eps
+        self.fit_mask[~invertable] = True
+
         converged_grad = np.full(grad.shape, False)
-        converged_grad[...,diag,diag] = fit_mask
+        converged_grad[...,diag,diag] = self.fit_mask
         grad[converged_grad] = 1.0
 
 
         Jt_w_Jinv = np.linalg.inv(grad)
         Jt_w_yyp = Einsum.matmul(Jt_w, y_yp)
         h_lm = Einsum.matmul(Jt_w_Jinv, Jt_w_yyp)
-
-
-
-
 
 
         # Update the parameters and check whether they are in bounds. This algorithm is primarily
@@ -172,7 +196,7 @@ class LMFit(object):
                     tmp_params[key]['values'][d_min] = params_dict[key]['min']
 
 
-                self.diverged[d_min] = True
+                self.fit_mask[d_min] = True
 
             if params_dict[key]['max'] is not None:
                 d_max = tmp_params[key]['values'] > params_dict[key]['max']
@@ -182,12 +206,7 @@ class LMFit(object):
                 else:
                     tmp_params[key]['values'][d_max] = params_dict[key]['max']
 
-                self.diverged[d_max] = True
-
-        # Update mask to stop fitting if diverged.
-        fit_mask = (self.converged | self.diverged)
-        fit_mask_inv = ~fit_mask
-
+                self.fit_mask[d_max] = True
 
 
 
@@ -206,7 +225,8 @@ class LMFit(object):
         rho = rho_numerator / rho_denominator
 
         # When fitting stops, this will stop div by zero later.
-        rho[fit_mask] = 1.0
+        self.fit_mask[rho == 0.0] = True
+        rho[self.fit_mask] = 1.0
 
 
 
@@ -220,7 +240,7 @@ class LMFit(object):
         b[rho>LMFit.epsilon_4] = 0.0
 
         self.lm_step = a + b
-        rho_mask = (rho > LMFit.epsilon_4) & fit_mask_inv
+        rho_mask = (rho > LMFit.epsilon_4) & ~self.fit_mask
 
         for i, key in enumerate(params_dict.keys()):
             params_dict[key]['values'][rho_mask] = tmp_params[key]['values'][rho_mask]
@@ -240,10 +260,10 @@ class LMFit(object):
         convergence_3 = (chi_2_new / (self.m_points - self.n_params + 1)) < LMFit.epsilon_3
 
         self.converged |= convergence_1 | convergence_2 | convergence_3
+        self.fit_mask[self.converged] = True
 
 
         # 4.2 eqn 21
-        Jt = Einsum.transpose(model_new['J'])
         Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
         Jt_w_J = Einsum.matmul(Jt_w, model_new['J'])
 

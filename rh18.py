@@ -3,6 +3,7 @@ import rawacf_dmap_read as rdr
 import data_fitting
 import sys
 import time
+
 def determine_noise(pwr0):
 
     sorted_pwr0 = np.sort(pwr0)
@@ -309,6 +310,7 @@ def fit_all_records(records_data):
                                                                 mpinc, lagfr, smsep)
     blanking_mask = create_blanking_mask(num_range_gates, pulses_as_samples, samples_for_lags,
                                             data_mask, num_averages)
+
     good_points = np.count_nonzero(blanking_mask == False, axis=-1)
     good_points = good_points[...,np.newaxis,np.newaxis]
 
@@ -391,16 +393,13 @@ def fit_all_records(records_data):
                    'converged' : np.vstack(tmp[4])}
 
 
-    records_data[k]['fitted_data'] = fitted_data
+    return fitted_data
 
-# def write_to_file(records_data):
+def write_to_file(records_data, fitted_data):
+    pass
 
 
-#     max_nrang = 0
-#     total_records = 0
-#     for k,v in records_data.items():
-#         max_nrang = max(max_nrang, v['split_data']['nrang'])
-#         total_records += len(v['record_nums'].keys())
+
 
 
 
@@ -409,7 +408,7 @@ if __name__ == '__main__':
 
     records_data = data_read.get_parsed_data()
 
-    fit_all_records(records_data)
+    fitted_data = fit_all_records(records_data)
 
 
 
