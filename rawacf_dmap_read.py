@@ -295,7 +295,11 @@ class RawacfDmapRead(object):
 
         groups[b"data_mask"] = data_mask
 
-        return groups
+        g = {}
+        for k,v in groups.items():
+            g[k.decode('utf-8')] = v
+
+        return g
 
     def get_parsed_data(self):
         return self.parsed_data

@@ -38,7 +38,7 @@ class LMFit(object):
     epsilon_2 = 1e-3
     epsilon_3 = 1e-1
     epsilon_4 = 1e-1
-    epsilon_5 = 2.e-3
+    epsilon_5 = 2.5e-3 # new constant introduced.
 
     L_0 = 1e-2
     L_increase = 11

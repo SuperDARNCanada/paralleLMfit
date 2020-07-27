@@ -4,6 +4,8 @@ import data_fitting
 import sys
 import time
 
+import deepdish as dd
+
 def determine_noise(pwr0):
 
     sorted_pwr0 = np.sort(pwr0)
@@ -274,22 +276,22 @@ def fit_all_records(records_data):
               'V': {'values' : None, 'min' : None, 'max' : None}}
 
 
-    transmit_freq = records_data[b'tfreq']
-    offset = records_data[b'offset']
-    num_averages = records_data[b'nave']
-    pwr0 = records_data[b'pwr0']
-    acf = records_data[b'acfd']
-    xcf = records_data[b'xcfd']
-    lags = records_data[b'ltab']
-    pulses = records_data[b'ptab']
-    slist = records_data[b'slist']
+    transmit_freq = records_data['tfreq']
+    offset = records_data['offset']
+    num_averages = records_data['nave']
+    pwr0 = records_data['pwr0']
+    acf = records_data['acfd']
+    xcf = records_data['xcfd']
+    lags = records_data['ltab']
+    pulses = records_data['ptab']
+    slist = records_data['slist']
 
-    mpinc = records_data[b'mpinc']
-    lagfr = records_data[b'lagfr']
-    smsep = records_data[b'smsep']
+    mpinc = records_data['mpinc']
+    lagfr = records_data['lagfr']
+    smsep = records_data['smsep']
     num_range_gates = acf.shape[1]
 
-    data_mask = records_data[b"data_mask"]
+    data_mask = records_data["data_mask"]
 
     acf = data_fitting.Einsum.transpose(acf)
 
@@ -371,7 +373,7 @@ def fit_all_records(records_data):
 
 
     if even_chunks > 0:
-        for i in range(even_chunks-1):
+        for i in range(even_chunks):
             do_fits(i*step,(i+1)*step)
 
     if remainder:
@@ -380,9 +382,9 @@ def fit_all_records(records_data):
     tmp = ([], [], [], [], [])
 
     for f in fits:
-        tmp[0].append(f.params['p0'])
-        tmp[1].append(f.params['W'])
-        tmp[2].append(f.params['V'])
+        tmp[0].append(f.fitted_params['p0']['values'])
+        tmp[1].append(f.fitted_params['W']['values'])
+        tmp[2].append(f.fitted_params['V']['values'])
         tmp[3].append(f.cov_mat)
         tmp[4].append(f.converged)
 
@@ -395,20 +397,45 @@ def fit_all_records(records_data):
 
     return fitted_data
 
-def write_to_file(records_data, fitted_data):
-    pass
+def write_to_file(records_data, fitted_data, output_name):
 
+    output_data = {}
 
+    records_data.pop('acfd', None)
+    records_data.pop('xcfd', None)
+    records_data.pop('slist', None)
+    records_data.pop('pwr0', None)
+    records_data.pop('data_mask', None)
 
+    for k,v in records_data.items():
+        output_data[k] = v
+
+    for k,v in fitted_data.items():
+        output_data[k] = v
+
+    dd.io.save(output_name, output_data, compression='zlib')
 
 
 
 if __name__ == '__main__':
-    data_read = rdr.RawacfDmapRead("20170714.0601.00.sas.rawacf")
+
+    input_file = sys.argv[1]
+
+    data_read = rdr.RawacfDmapRead(input_file)
 
     records_data = data_read.get_parsed_data()
 
     fitted_data = fit_all_records(records_data)
+
+    output_name = input_file.split('.')
+    output_name[-1] = 'rh18.hdf5'
+    output_name = ".".join(output_name)
+
+    write_to_file(records_data, fitted_data, output_name)
+
+
+
+
 
 
 
