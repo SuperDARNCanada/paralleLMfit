@@ -1,6 +1,22 @@
-import numpy as np
+#import numpy as np
 import copy
 import sys
+import numpy as np
+
+try:
+    import cupy as cp
+except ImportError:
+    cupy_available = False
+else:
+    cupy_available = True
+
+def get_backend(ndarray):
+    if cupy_available:
+        xp = cp.get_array_module(ndarray)
+    else:
+        xp = np
+
+    return xp
 
 class Einsum(object):
     """Einsum helper functions."""
@@ -8,22 +24,30 @@ class Einsum(object):
     @staticmethod
     def transpose(ndarray):
         transpose_definition = '...lm->...ml'
-        return np.einsum(transpose_definition, ndarray)
+
+        xp = get_backend(ndarray)
+        return xp.einsum(transpose_definition, ndarray)
 
     @staticmethod
     def matmul(ndarray1, ndarray2):
         matmul_definition = '...ij,...jk->...ik'
-        return np.einsum(matmul_definition, ndarray1, ndarray2)
+
+        xp = get_backend(ndarray1)
+        return xp.einsum(matmul_definition, ndarray1, ndarray2)
 
     @staticmethod
     def chained_matmul(ndarray1, ndarray2, ndarray3):
         chained_definition = '...ij,...jk,...km->...im'
-        return np.einsum(chained_definition , ndarray1, ndarray2, ndarray3)
+
+        xp = get_backend(ndarray1)
+        return xp.einsum(chained_definition , ndarray1, ndarray2, ndarray3)
 
     @staticmethod
     def reduce_dimensions(ndarray):
         reduce_definition = '...lm->...l'
-        return np.einsum(reduce_definition, ndarray)
+
+        xp = get_backend(ndarray)
+        return xp.einsum(reduce_definition, ndarray)
 
 
 class LMFit(object):
@@ -52,18 +76,20 @@ class LMFit(object):
     def __init__(self, data, model_dict, weights, params_dict, lm_step_shape, num_points=None):
         super(LMFit, self).__init__()
 
+        xp = get_backend(weights)
+
         self.lm_step = np.ones(lm_step_shape) * LMFit.L_0
 
-        self.converged = np.full(lm_step_shape, False)
+        self.converged = xp.full(lm_step_shape, False)
 
         # Using matrix operations, it's not possible to selectively perform fits. Masks are used
         # to avoid fitting issues when fits have finished or failed.
-        self.fit_mask = np.full(lm_step_shape, False)
+        self.fit_mask = xp.full(lm_step_shape, False)
 
         self.n_params = len(params_dict.keys())
 
         if num_points is not None:
-            tmp_points = np.resize(num_points, lm_step_shape)
+            tmp_points = xp.resize(num_points, lm_step_shape)
             self.fit_mask[tmp_points<=0] = True
 
             tmp_points[tmp_points<=0] = self.n_params
@@ -92,20 +118,21 @@ class LMFit(object):
 
             # print('fit_status', self.fit_mask[0,0,:,0])
 
-            print('fit_%', (np.count_nonzero(self.fit_mask)/self.fit_mask.size) * 100)
-            print('converge_%', (np.count_nonzero(self.converged)/self.converged.size) * 100)
+            # print('fit_%', (xp.count_nonzero(self.fit_mask)/self.fit_mask.size) * 100)
+            # print('converge_%', (xp.count_nonzero(self.converged)/self.converged.size) * 100)
             if i == 0:
-                prev_num_stopped_fits = np.count_nonzero(self.fit_mask)
+                prev_num_stopped_fits = xp.count_nonzero(self.fit_mask)
             else:
-                num_stopped_fits = np.count_nonzero(self.fit_mask)
+                num_stopped_fits = xp.count_nonzero(self.fit_mask)
                 change = 1 - (prev_num_stopped_fits / num_stopped_fits)
-                print("change", change)
+                # print("change", change)
                 if change < LMFit.epsilon_5:
                     break
                 prev_num_stopped_fits = num_stopped_fits
 
             i += 1
 
+        self.compute_cov_mat(model_dict, weights, params_dict)
         self.fitted_params = params_dict
 
 
@@ -125,6 +152,23 @@ class LMFit(object):
 
         return chi_2
 
+    def compute_cov_mat(self, model_dict, weights, params_dict):
+
+        xp = get_backend(weights)
+
+        model = model_dict['model_fn'](params_dict, **model_dict['args'])
+
+        Jt = Einsum.transpose(model['J'])
+        Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
+        Jt_w_J = Einsum.matmul(Jt_w, model['J'])
+
+        diag = xp.arange(Jt_w_J.shape[-1])
+
+        stopped_grad = xp.full(Jt_w_J.shape, False)
+        stopped_grad[...,diag,diag] = ~self.converged
+        Jt_w_J[stopped_grad] = 1.0
+
+        self.cov_mat = np.linalg.inv(Jt_w_J)
 
     def levenburg_marquardt_iteration(self, data, model_dict, weights, params_dict):
         """
@@ -143,6 +187,7 @@ class LMFit(object):
         :type       params_dict:  dict
         """
 
+        xp = get_backend(weights)
 
         model = model_dict['model_fn'](params_dict, **model_dict['args'])
 
@@ -155,9 +200,9 @@ class LMFit(object):
         Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
 
-        diag = np.arange(Jt_w_J.shape[-1])
+        diag = xp.arange(Jt_w_J.shape[-1])
 
-        lm_Jt_w_J_diag = np.zeros(Jt_w_J.shape)
+        lm_Jt_w_J_diag = xp.zeros(Jt_w_J.shape)
         lm_Jt_w_J_diag[...,diag,diag] = (self.lm_step * Jt_w_J[...,diag,diag])
 
         grad = Jt_w_J + lm_Jt_w_J_diag
@@ -166,17 +211,19 @@ class LMFit(object):
         # When fits converge/diverge such that the gradients tend to 0, this stops the matrix
         # from becoming singular.
 
-        invertable = np.linalg.cond(grad) < 1/np.finfo(grad.dtype).eps
+        invertable = xp.linalg.cond(grad) < 1/xp.finfo(grad.dtype).eps
         self.fit_mask[~invertable] = True
 
-        converged_grad = np.full(grad.shape, False)
-        converged_grad[...,diag,diag] = self.fit_mask
-        grad[converged_grad] = 1.0
+        stopped_grad = xp.full(grad.shape, False)
+        stopped_grad[...,diag,diag] = self.fit_mask
+        grad[stopped_grad] = 1.0
 
 
         Jt_w_Jinv = np.linalg.inv(grad)
         Jt_w_yyp = Einsum.matmul(Jt_w, y_yp)
         h_lm = Einsum.matmul(Jt_w_Jinv, Jt_w_yyp)
+
+        del model, y_yp, Jt, Jt_w, Jt_w_J, diag, invertable, stopped_grad, grad, Jt_w_Jinv
 
 
         # Update the parameters and check whether they are in bounds. This algorithm is primarily
@@ -229,14 +276,15 @@ class LMFit(object):
         rho[self.fit_mask] = 1.0
 
 
+        del lm_Jt_w_J_diag, Jt_w_yyp, chi_2, rho_numerator, rho_denominator,
 
 
 
         # using 4.1.1 method #1 for the update
-        a = np.maximum(self.lm_step / LMFit.L_decrease, LMFit.L_min)
+        a = xp.maximum(self.lm_step / LMFit.L_decrease, LMFit.L_min)
         a[rho<=LMFit.epsilon_4] = 0.0
 
-        b = np.minimum(self.lm_step * LMFit.L_increase, LMFit.L_max)
+        b = xp.minimum(self.lm_step * LMFit.L_increase, LMFit.L_max)
         b[rho>LMFit.epsilon_4] = 0.0
 
         self.lm_step = a + b
@@ -246,16 +294,16 @@ class LMFit(object):
             params_dict[key]['values'][rho_mask] = tmp_params[key]['values'][rho_mask]
 
 
-
+        del a, b, rho_mask
 
 
         # 4.1.3 convergence criteria
         Jt = Einsum.transpose(model_new['J'])
         Jt_w_yyp = Einsum.chained_matmul(Jt, weights[...,np.newaxis,:,:], y_yp_new)
 
-        convergence_1 = np.abs(Jt_w_yyp).max(axis=3) < LMFit.epsilon_1
+        convergence_1 = xp.abs(Jt_w_yyp).max(axis=3) < LMFit.epsilon_1
 
-        convergence_2 = np.abs(h_lm / rho[...,np.newaxis,:]).max(axis=3) < LMFit.epsilon_2
+        convergence_2 = xp.abs(h_lm / rho[...,np.newaxis,:]).max(axis=3) < LMFit.epsilon_2
 
         convergence_3 = (chi_2_new / (self.m_points - self.n_params + 1)) < LMFit.epsilon_3
 
@@ -264,14 +312,14 @@ class LMFit(object):
 
 
         # 4.2 eqn 21
-        Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
-        Jt_w_J = Einsum.matmul(Jt_w, model_new['J'])
+        # Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
+        # Jt_w_J = Einsum.matmul(Jt_w, model_new['J'])
 
-        diag = np.arange(Jt_w_J.shape[-1])
+        # diag = xp.arange(Jt_w_J.shape[-1])
 
-        converged_grad = np.full(Jt_w_J.shape, False)
-        converged_grad[...,diag,diag] = ~self.converged
-        Jt_w_J[converged_grad] = 1.0
+        # stopped_grad = xp.full(Jt_w_J.shape, False)
+        # stopped_grad[...,diag,diag] = ~self.converged
+        # Jt_w_J[stopped_grad] = 1.0
 
-        self.cov_mat = np.linalg.inv(grad)
+        # self.cov_mat = np.linalg.inv(Jt_w_J)
 
