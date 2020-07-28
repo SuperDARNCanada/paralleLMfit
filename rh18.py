@@ -60,7 +60,7 @@ def calculate_samples(num_range_gates, ltab, ptab, mpinc, lagfr, smsep):
         return p - n*(xp.arange(m)[:,xp.newaxis, xp.newaxis])
 
     lags_pulse_idx = searchsorted2d(ptab[...,xp.newaxis], ltab)
-    lags_pulse_idx = xp.resize(lags_pulse_idx[...,xp.newaxis], (*lags_pulse_idx.shape, num_range_gates))
+    lags_pulse_idx = xp.repeat(lags_pulse_idx[...,xp.newaxis], num_range_gates, axis=-1)
 
     samples_for_lags = xp.take(samples[...,xp.newaxis,:,:], lags_pulse_idx)
 
@@ -112,7 +112,8 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
                 data_mask[...,xp.newaxis])
 
 
-    tmp_pwr = xp.resize(pwr0[...,xp.newaxis,xp.newaxis,:], condition.shape)
+    tmp_pwr = xp.array(xp.broadcast_to(pwr0[...,xp.newaxis,xp.newaxis,:,xp.newaxis], condition.shape))
+
     tmp_pwr[~condition] = 0.0
 
     affected_pwr = xp.sqrt(tmp_pwr)

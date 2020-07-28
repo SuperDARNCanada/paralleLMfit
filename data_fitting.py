@@ -89,7 +89,7 @@ class LMFit(object):
         self.n_params = len(params_dict.keys())
 
         if num_points is not None:
-            tmp_points = xp.resize(num_points, lm_step_shape)
+            tmp_points = xp.array(xp.broadcast_to(num_points, lm_step_shape))
             self.fit_mask[tmp_points<=0] = True
 
             tmp_points[tmp_points<=0] = self.n_params
