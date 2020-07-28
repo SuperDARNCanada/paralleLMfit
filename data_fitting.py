@@ -1,4 +1,4 @@
-#import numpy as np
+#import numpy as xp
 import copy
 import sys
 import numpy as np
@@ -78,7 +78,7 @@ class LMFit(object):
 
         xp = get_backend(weights)
 
-        self.lm_step = np.ones(lm_step_shape) * LMFit.L_0
+        self.lm_step = xp.ones(lm_step_shape) * LMFit.L_0
 
         self.converged = xp.full(lm_step_shape, False)
 
@@ -146,8 +146,10 @@ class LMFit(object):
         :type       weights:  { type_description }
         """
 
+        xp = get_backend(weights)
+
         y_ypt = Einsum.transpose(y_yp)
-        chi_2 = Einsum.chained_matmul(y_ypt, weights[:,:,np.newaxis,:,:], y_yp)
+        chi_2 = Einsum.chained_matmul(y_ypt, weights[:,:,xp.newaxis,:,:], y_yp)
         chi_2 = Einsum.reduce_dimensions(chi_2)
 
         return chi_2
@@ -159,7 +161,7 @@ class LMFit(object):
         model = model_dict['model_fn'](params_dict, **model_dict['args'])
 
         Jt = Einsum.transpose(model['J'])
-        Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
+        Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
@@ -168,7 +170,7 @@ class LMFit(object):
         stopped_grad[...,diag,diag] = ~self.converged
         Jt_w_J[stopped_grad] = 1.0
 
-        self.cov_mat = np.linalg.inv(Jt_w_J)
+        self.cov_mat = xp.linalg.inv(Jt_w_J)
 
     def levenburg_marquardt_iteration(self, data, model_dict, weights, params_dict):
         """
@@ -191,13 +193,13 @@ class LMFit(object):
 
         model = model_dict['model_fn'](params_dict, **model_dict['args'])
 
-        y_yp = (data[...,np.newaxis,:] - model['model'])[...,np.newaxis]
+        y_yp = (data[...,xp.newaxis,:] - model['model'])[...,xp.newaxis]
         chi_2 = self.compute_chi2(y_yp, weights)
 
 
         # Eqn #13
         Jt = Einsum.transpose(model['J'])
-        Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
+        Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
@@ -219,7 +221,7 @@ class LMFit(object):
         grad[stopped_grad] = 1.0
 
 
-        Jt_w_Jinv = np.linalg.inv(grad)
+        Jt_w_Jinv = xp.linalg.inv(grad)
         Jt_w_yyp = Einsum.matmul(Jt_w, y_yp)
         h_lm = Einsum.matmul(Jt_w_Jinv, Jt_w_yyp)
 
@@ -237,7 +239,7 @@ class LMFit(object):
             if params_dict[key]['min'] is not None:
                 d_min = tmp_params[key]['values'] < params_dict[key]['min']
 
-                if isinstance(params_dict[key]['min'], np.ndarray):
+                if isinstance(params_dict[key]['min'], xp.ndarray):
                     tmp_params[key]['values'][d_min] = params_dict[key]['min'][d_min]
                 else:
                     tmp_params[key]['values'][d_min] = params_dict[key]['min']
@@ -248,7 +250,7 @@ class LMFit(object):
             if params_dict[key]['max'] is not None:
                 d_max = tmp_params[key]['values'] > params_dict[key]['max']
 
-                if isinstance(params_dict[key]['max'], np.ndarray):
+                if isinstance(params_dict[key]['max'], xp.ndarray):
                     tmp_params[key]['values'][d_max] = params_dict[key]['max'][d_max]
                 else:
                     tmp_params[key]['values'][d_max] = params_dict[key]['max']
@@ -260,7 +262,7 @@ class LMFit(object):
 
         # Eqn #16, calculating rho
         model_new = model_dict['model_fn'](tmp_params, **model_dict['args'])
-        y_yp_new = (data[...,np.newaxis,:] - model_new['model'])[...,np.newaxis]
+        y_yp_new = (data[...,xp.newaxis,:] - model_new['model'])[...,xp.newaxis]
         chi_2_new = self.compute_chi2(y_yp_new, weights)
 
 
@@ -299,11 +301,11 @@ class LMFit(object):
 
         # 4.1.3 convergence criteria
         Jt = Einsum.transpose(model_new['J'])
-        Jt_w_yyp = Einsum.chained_matmul(Jt, weights[...,np.newaxis,:,:], y_yp_new)
+        Jt_w_yyp = Einsum.chained_matmul(Jt, weights[...,xp.newaxis,:,:], y_yp_new)
 
         convergence_1 = xp.abs(Jt_w_yyp).max(axis=3) < LMFit.epsilon_1
 
-        convergence_2 = xp.abs(h_lm / rho[...,np.newaxis,:]).max(axis=3) < LMFit.epsilon_2
+        convergence_2 = xp.abs(h_lm / rho[...,xp.newaxis,:]).max(axis=3) < LMFit.epsilon_2
 
         convergence_3 = (chi_2_new / (self.m_points - self.n_params + 1)) < LMFit.epsilon_3
 
@@ -312,7 +314,7 @@ class LMFit(object):
 
 
         # 4.2 eqn 21
-        # Jt_w = Einsum.matmul(Jt, weights[...,np.newaxis,:,:])
+        # Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
         # Jt_w_J = Einsum.matmul(Jt_w, model_new['J'])
 
         # diag = xp.arange(Jt_w_J.shape[-1])
@@ -321,5 +323,5 @@ class LMFit(object):
         # stopped_grad[...,diag,diag] = ~self.converged
         # Jt_w_J[stopped_grad] = 1.0
 
-        # self.cov_mat = np.linalg.inv(Jt_w_J)
+        # self.cov_mat = xp.linalg.inv(Jt_w_J)
 
