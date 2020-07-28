@@ -271,7 +271,7 @@ class LMFit(object):
 
         converged_grad = np.full(Jt_w_J.shape, False)
         converged_grad[...,diag,diag] = ~self.converged
-        grad[converged_grad] = 1.0
+        Jt_w_J[converged_grad] = 1.0
 
         self.cov_mat = np.linalg.inv(grad)
 
