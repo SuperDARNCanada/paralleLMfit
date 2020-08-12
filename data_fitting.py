@@ -170,7 +170,7 @@ class LMFit(object):
         stopped_grad[...,diag,diag] = ~self.converged
         Jt_w_J[stopped_grad] = 1.0
 
-        self.cov_mat = xp.linalg.inv(Jt_w_J)
+        self.cov_mat = xp.linalg.pinv(Jt_w_J)
 
     def levenburg_marquardt_iteration(self, data, model_dict, weights, params_dict):
         """
@@ -213,19 +213,19 @@ class LMFit(object):
         # When fits converge/diverge such that the gradients tend to 0, this stops the matrix
         # from becoming singular.
 
-        invertable = xp.linalg.cond(grad) < 1/xp.finfo(grad.dtype).eps
-        self.fit_mask[~invertable] = True
+        #invertable = xp.linalg.cond(grad) < 1/xp.finfo(grad.dtype).eps
+        #self.fit_mask[~invertable] = True
 
         stopped_grad = xp.full(grad.shape, False)
         stopped_grad[...,diag,diag] = self.fit_mask
         grad[stopped_grad] = 1.0
 
 
-        Jt_w_Jinv = xp.linalg.inv(grad)
+        Jt_w_Jinv = xp.linalg.pinv(grad)
         Jt_w_yyp = Einsum.matmul(Jt_w, y_yp)
         h_lm = Einsum.matmul(Jt_w_Jinv, Jt_w_yyp)
 
-        del model, y_yp, Jt, Jt_w, Jt_w_J, diag, invertable, stopped_grad, grad, Jt_w_Jinv
+        del model, y_yp, Jt, Jt_w, Jt_w_J, diag, stopped_grad, grad, Jt_w_Jinv
 
 
         # Update the parameters and check whether they are in bounds. This algorithm is primarily
