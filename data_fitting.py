@@ -164,16 +164,11 @@ class LMFit(object):
         Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
 
-
         diag = xp.arange(Jt_w_J.shape[-1])
 
         stopped_grad = xp.full(Jt_w_J.shape, False)
         stopped_grad[...,diag,diag] = ~self.converged
         Jt_w_J[stopped_grad] = 1.0
-
-        invertable = xp.linalg.cond(Jt_w_J) < 1/xp.finfo(Jt_w_J.dtype).eps
-
-        print(Jt_w_J[~invertable,:,:])
 
         self.cov_mat = xp.linalg.inv(Jt_w_J)
 

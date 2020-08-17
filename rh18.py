@@ -3,9 +3,9 @@ import data_fitting
 import sys
 import time
 import argparse
-
 import deepdish as dd
 
+from multiprocessing.pool import ThreadPool
 
 def determine_noise(pwr0):
 
@@ -273,7 +273,7 @@ def fit_all_records(records_data):
     step = 10
 
     params = {'p0': {'values' : None, 'min' : 0.0001, 'max' : None},
-              'W': {'values' : None, 'min' : -200.0, 'max' : None},
+              'W': {'values' : None, 'min' : -200.0, 'max' : 8000.0},
               'V': {'values' : None, 'min' : None, 'max' : None}}
 
 
@@ -333,7 +333,10 @@ def fit_all_records(records_data):
     remainder = total_records - (even_chunks * step)
 
     fits = []
-    def do_fits(start, stop):
+    def do_fits(args):
+
+        start = args[0]
+        stop = args[1]
 
         W_i = initial_W[start:stop,...]
         V_i = initial_V[start:stop,...]
@@ -361,18 +364,23 @@ def fit_all_records(records_data):
 
         acf_i = acf[start:stop,...]
 
-        lm_step_shape = (step, num_range_gates, num_velocity_models, 1)
+        lm_step_shape = (stop-start, num_range_gates, num_velocity_models, 1)
 
         gp = good_points[start:stop,...]
-        fits.append(data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape, gp))
 
+        return data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape, gp)
 
+    argv = []
     if even_chunks > 0:
         for i in range(even_chunks):
-            do_fits(i*step,(i+1)*step)
+            argv.append((i*step,(i+1)*step))
 
     if remainder:
-        do_fits(even_chunks*step, total_records)
+        argv.append(even_chunks*step, total_records)
+
+    p = ThreadPool()
+
+    fits = p.map(do_fits, argv)
 
     tmp = ([], [], [], [], [])
 
