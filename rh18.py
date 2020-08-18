@@ -319,7 +319,7 @@ def fit_all_records(records_data):
 
     initial_V = calculate_initial_V(wavelength, num_velocity_models, num_range_gates, mpinc)
     initial_W = calculate_initial_W(initial_V.shape)
-    initial_p0 = pwr0[...,xp.newaxis,xp.newaxis] * 2
+    initial_p0 = pwr0[...,xp.newaxis,xp.newaxis]
 
     total_records = pwr0.shape[0]
     consistent_shape = (total_records, num_range_gates, num_velocity_models, 1)
