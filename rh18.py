@@ -30,10 +30,10 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
     diag_r = diag[0:error.shape[2]]
     diag_i = diag[error.shape[2]:]
 
-    weights[...,diag_r,diag_r] = error
-    weights[...,diag_i,diag_i] = error
+    weights[...,diag_r,diag_r] = 1.0 / error**2
+    weights[...,diag_i,diag_i] = 1.0 / error**2
 
-    weights[...,diag,diag][blanking_mask] = 1e20
+    weights[...,diag,diag][blanking_mask] = 1e-20
 
     return weights
 
