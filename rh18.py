@@ -376,7 +376,7 @@ def fit_all_records(records_data):
             argv.append((i*step,(i+1)*step))
 
     if remainder:
-        argv.append(even_chunks*step, total_records)
+        argv.append((even_chunks*step, total_records))
 
     p = ThreadPool()
 
