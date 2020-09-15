@@ -73,11 +73,11 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
     # [0 0 0 i1 0 0]   [0 0 0 e1 0 0]
     # [0 0 0 0 i2 0]   [0 0 0 0 e2 0]
     # [0 0 0 0 0 i3]   [0 0 0 0 0 e3]
-    weights[...,diag_r,diag_r] = error
-    weights[...,diag_i,diag_i] = error
+    weights[...,diag_r,diag_r] = 1.0 / error**2
+    weights[...,diag_i,diag_i] = 1.0 / error**2
 
     # [num_records, num_ranges, num_lags*2]
-    weights[...,diag,diag][blanking_mask] = 1e20
+    weights[...,diag,diag][blanking_mask] = 1e-20
 
     return weights
 
@@ -584,7 +584,7 @@ def fit_all_records(records_data):
             argv.append((i*step, (i+1)*step))
 
     if remainder:
-        argv.append(even_chunks*step, total_records)
+        argv.append((even_chunks*step, total_records))
 
     p = ThreadPool()
 
