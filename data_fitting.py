@@ -111,21 +111,11 @@ class LMFit(object):
             print("Running step: ", i)
             self.levenburg_marquardt_iteration(data, model_dict, weights, params_dict)
 
-
-            # print('p0', params_dict['p0']['values'][0,0,:,0])
-            # print('W', params_dict['W']['values'][0,0,:,0])
-            # print('V', params_dict['V']['values'][0,0,:,0])
-
-            # print('fit_status', self.fit_mask[0,0,:,0])
-
-            # print('fit_%', (xp.count_nonzero(self.fit_mask)/self.fit_mask.size) * 100)
-            # print('converge_%', (xp.count_nonzero(self.converged)/self.converged.size) * 100)
             if i == 0:
                 prev_num_stopped_fits = xp.count_nonzero(self.fit_mask)
             else:
                 num_stopped_fits = xp.count_nonzero(self.fit_mask)
                 change = 1 - (prev_num_stopped_fits / num_stopped_fits)
-                # print("change", change)
                 if change < LMFit.epsilon_5:
                     break
                 prev_num_stopped_fits = num_stopped_fits
@@ -264,6 +254,7 @@ class LMFit(object):
         model_new = model_dict['model_fn'](tmp_params, **model_dict['args'])
         y_yp_new = (data[...,xp.newaxis,:] - model_new['model'])[...,xp.newaxis]
         chi_2_new = self.compute_chi2(y_yp_new, weights)
+        self.chi_2 = chi_2_new
 
 
         rho_numerator = chi_2 - chi_2_new
