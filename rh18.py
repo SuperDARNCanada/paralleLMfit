@@ -600,12 +600,12 @@ def fit_all_records(records_data):
         tmp[4].append(f.converged)
         tmp[5].append(f.chi_2)
 
-    fitted_data = {'p0' : xp.vstack(tmp[0]).asnumpy(),
-                   'W' : xp.vstack(tmp[1]).asnumpy(),
-                   'V' : xp.vstack(tmp[2]).asnumpy(),
-                   'cov_mat' : xp.vstack(tmp[3]).asnumpy(),
-                   'converged' : xp.vstack(tmp[4]).asnumpy(),
-                   'chi_2': xp.vstack(tmp[5]).asnumpy()}
+    fitted_data = {'p0' : xp.vstack(tmp[0]),
+                   'W' : xp.vstack(tmp[1]),
+                   'V' : xp.vstack(tmp[2]),
+                   'cov_mat' : xp.vstack(tmp[3]),
+                   'converged' : xp.vstack(tmp[4]),
+                   'chi_2': xp.vstack(tmp[5])}
 
 
     return fitted_data
