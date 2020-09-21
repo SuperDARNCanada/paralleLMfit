@@ -252,6 +252,7 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
                         first_range_in_samps[:,xp.newaxis,xp.newaxis,xp.newaxis,xp.newaxis])
     affected_ranges = affected_ranges.astype(int)
 
+    #print(affected_ranges[0,1,0])
     ranges = xp.arange(num_range_gates)
     ranges_reshape = ranges[xp.newaxis,xp.newaxis,xp.newaxis,:,xp.newaxis]
 
@@ -265,11 +266,14 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
                 (affected_ranges >= 0) &
                 data_mask[...,xp.newaxis])
 
-    # [num_records, 1, 1, num_ranges, 1]
-    tmp_pwr = xp.array(xp.broadcast_to(pwr0[...,xp.newaxis,xp.newaxis,:,xp.newaxis], condition.shape))
-
     # [num_records, num_lags+1, 2, num_ranges, num_pulses]
-    tmp_pwr[~condition] = 0.0
+    affected_ranges[~condition] = 0
+
+    # [num_records, num_ranges]
+    # [num_records, -1]
+    tmp_pwr = xp.take_along_axis(pwr0, affected_ranges.reshape(affected_ranges.shape[0],-1), axis=1)
+    tmp_pwr = tmp_pwr.reshape(affected_ranges.shape)
+    tmp_pwr[~condition] = 0
 
     # [num_records, num_lags+1, 2, num_ranges, num_pulses]
     affected_pwr = xp.sqrt(tmp_pwr)
