@@ -121,40 +121,17 @@ def calculate_samples(num_range_gates, ltab, ptab, mpinc, lagfr, smsep):
     # [num_records, ]
     first_range_in_samps = lagfr/smsep
 
-    first_range_in_samps = first_range_in_samps[...,xp.newaxis,xp.newaxis]
+    # [num_ranges, ]
+    # [num_records, 1, 1, 1]
+    range_off = ranges + first_range_in_samps[...,xp.newaxis,xp.newaxis,xp.newaxis]
 
-    # [num_records, num_pulses, num_ranges]
-    # [num_records, 1, 1]
-    # [1, 1, num_ranges]
-    # [num_records, 1, 1]
-    samples_used = ((pulses_by_ranges * ranges_per_tau) +
-                    ranges[xp.newaxis,xp.newaxis,:] +
-                    first_range_in_samps)
-    samples_used = data_fitting.Einsum.transpose(samples_used)
+    # [num_records, num_lags+1, 2]
+    # [num_records, ]
+    lags_pairs_as_samples = ltab * ranges_per_tau
 
-    def searchsorted2d(a,b):
-        """https://stackoverflow.com/questions/40588403/vectorized-searchsorted-numpy"""
-        m,n,o = a.shape
-        max_num = xp.maximum(a.max() - a.min(), b.max() - b.min()) + 1
-        r = max_num*xp.arange(a.shape[0])[:,xp.newaxis,xp.newaxis]
-        p = xp.searchsorted( (a+r).ravel(), (b+r).ravel() ).reshape(b.shape)
-        return p - n*(xp.arange(m)[:,xp.newaxis, xp.newaxis])
-
-    lags_pulse_idx = searchsorted2d(ptab[...,xp.newaxis], ltab)
-    lags_pulse_idx = xp.repeat(lags_pulse_idx[...,xp.newaxis], num_range_gates, axis=-1)
-
-    # [num_records, num_lags+1, 2, num_ranges]
-    lags_pulse_idx = xp.einsum('...ijk->...kij', lags_pulse_idx)
-    shape = lags_pulse_idx.shape
-    lags_pulse_idx = lags_pulse_idx.reshape((shape[:2]) + (shape[-1] * shape[-2],))
-
-    # [num_records, num_ranges, num_pulses]
-    # [num_records, num_ranges, num_lags+1 * 2]
-    samples_for_lags = xp.take_along_axis(samples_used, lags_pulse_idx, axis=-1)
-    samples_for_lags = samples_for_lags.reshape(shape)
-
-    # [num_records, num_ranges, num_lags+1, 2]
-    samples_for_lags = xp.einsum('...ijk->...jki', samples_for_lags)
+    # [num_records, 1, 1, num_ranges]
+    # [num_records, num_lags+1, 2, 1]
+    samples_for_lags = range_off + lags_pairs_as_samples[...,xp.newaxis]
 
     return pulses_as_samples, samples_for_lags
 
@@ -282,6 +259,7 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
     # [num_records, 1, 1, num_ranges, 1]
     clutter_term12 = xp.einsum('...ijk,...kjl->...j', affected_pwr,
                                             xp.sqrt(pwr0[...,xp.newaxis,xp.newaxis,:,xp.newaxis]))
+
 
     affected_pwr = affected_pwr[...,xp.newaxis]
 
