@@ -70,6 +70,8 @@ class LMFit(object):
     L_max = 1e7
     L_min = 1e-7
 
+    delta_p = 0.001
+
     iter_multiplier = 30
 
 
@@ -144,11 +146,69 @@ class LMFit(object):
 
         return chi_2
 
+    def get_model_and_J(self, model_dict, params_dict):
+        """
+        Evaluates the model with new parameters. If the user supplied function does not return
+        a Jacobian along with the evaluated function, then the central finite differences method
+        in 4.1.2 is used. Currently each iteration will use finite difference, but future
+        improvements will implement the optimizations outlined.
+
+        :param      model_dict:   model_fn : Reference to the function that yields the model and
+                                  residuals
+                                  args : possible args used by the model_fn
+        :type       model_dict:   dict
+        :param      params_dict:  Has a key for each param.
+                                  'param' : {'values','min','max'}
+        :type       params_dict:  dict
+
+        :returns:   The model and Jacobian.
+        :rtype:     dict
+        """
+
+        model = model_dict['model_fn'](params_dict, **model_dict['args'])
+
+        xp = get_backend(model['model'])
+
+        if 'J' not in model:
+            J_shape = model['model'].shape + (self.n_params,)
+            J = xp.empty(J_shape, dtype=model['model'].dtype)
+
+            for i, k in enumerate(params_dict.keys()):
+                tmp_params_upper = copy.deepcopy(params_dict)
+                tmp_params_lower = copy.deepcopy(params_dict)
+
+                dp = self.delta_p * (1 + xp.abs(params_dict[k]['values']))
+
+                tmp_params_upper[k]['values'] += dp
+                tmp_params_lower[k]['values'] -= dp
+
+                m1 = model_dict['model_fn'](tmp_params_upper, **model_dict['args'])
+                m2 = model_dict['model_fn'](tmp_params_lower, **model_dict['args'])
+
+                J[...,i] = (m1['model'] - m2['model']) / (2 * dp)
+
+            model['J'] = J
+
+        return model
+
     def compute_cov_mat(self, model_dict, weights, params_dict):
+        """
+        Calculates the covariance matrix.
+
+        :param      model_dict:   model_fn : Reference to the function that yields the model and
+                                  residuals
+                                  args : possible args used by the model_fn
+        :type       model_dict:   dict
+        :param      weights:      The weighted residuals.
+        :type       weights:      ndarray
+        :param      params_dict:  Has a key for each param.
+                                  'param' : {'values','min','max'}
+        :type       params_dict:  dict
+        """
 
         xp = get_backend(weights)
 
-        model = model_dict['model_fn'](params_dict, **model_dict['args'])
+        model = self.get_model_and_J(model_dict, params_dict)
 
         Jt = Einsum.transpose(model['J'])
         Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
@@ -181,11 +241,10 @@ class LMFit(object):
 
         xp = get_backend(weights)
 
-        model = model_dict['model_fn'](params_dict, **model_dict['args'])
+        model = self.get_model_and_J(model_dict, params_dict)
 
         y_yp = (data[...,xp.newaxis,:] - model['model'])[...,xp.newaxis]
         chi_2 = self.compute_chi2(y_yp, weights)
-
 
         # Eqn #13
         Jt = Einsum.transpose(model['J'])
@@ -251,11 +310,11 @@ class LMFit(object):
 
 
         # Eqn #16, calculating rho
-        model_new = model_dict['model_fn'](tmp_params, **model_dict['args'])
+        model_new = self.get_model_and_J(model_dict, tmp_params)
+
         y_yp_new = (data[...,xp.newaxis,:] - model_new['model'])[...,xp.newaxis]
         chi_2_new = self.compute_chi2(y_yp_new, weights)
         self.chi_2 = chi_2_new
-
 
         rho_numerator = chi_2 - chi_2_new
         rho_denominator = Einsum.matmul(Einsum.transpose(h_lm),
@@ -302,17 +361,3 @@ class LMFit(object):
 
         self.converged |= convergence_1 | convergence_2 | convergence_3
         self.fit_mask[self.converged] = True
-
-
-        # 4.2 eqn 21
-        # Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
-        # Jt_w_J = Einsum.matmul(Jt_w, model_new['J'])
-
-        # diag = xp.arange(Jt_w_J.shape[-1])
-
-        # stopped_grad = xp.full(Jt_w_J.shape, False)
-        # stopped_grad[...,diag,diag] = ~self.converged
-        # Jt_w_J[stopped_grad] = 1.0
-
-        # self.cov_mat = xp.linalg.inv(Jt_w_J)
-
