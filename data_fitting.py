@@ -75,11 +75,23 @@ class LMFit(object):
     iter_multiplier = 30
 
 
-    def __init__(self, data, model_dict, weights, params_dict, lm_step_shape, num_points=None):
+    def __init__(self, fn, x_data, y_data, params, weights, bounds=None, jac=None, num_points=None, **kwargs):
         super(LMFit, self).__init__()
-
         xp = get_backend(weights)
 
+        self.fn = fn
+        self.jac = jac
+        self.kwargs = kwargs
+
+        self.x_data = x_data
+        self.y_data = y_data
+        self.params = params
+        self.weights = weights
+        self.bounds = bounds
+
+
+
+        lm_step_shape = self.params.shape[:-2] + (1,1)
         self.lm_step = xp.ones(lm_step_shape) * LMFit.L_0
 
         self.converged = xp.full(lm_step_shape, False)
@@ -88,7 +100,7 @@ class LMFit(object):
         # to avoid fitting issues when fits have finished or failed.
         self.fit_mask = xp.full(lm_step_shape, False)
 
-        self.n_params = len(params_dict.keys())
+        self.n_params = self.params.shape[-2]
 
         if num_points is not None:
             tmp_points = xp.array(xp.broadcast_to(num_points, lm_step_shape))
@@ -97,13 +109,13 @@ class LMFit(object):
             tmp_points[tmp_points<=0] = self.n_params
             self.m_points = tmp_points
         else:
-            self.m_points = data.shape[-1]
+            self.m_points = y_data.shape[-2]
 
         n_iters = self.n_params * LMFit.iter_multiplier
 
         self.cov_mat = None
-        i = 0
 
+        i = 0
         prev_num_stopped_fits = 0
         while True:
 
@@ -111,215 +123,180 @@ class LMFit(object):
                 break
 
             print("Running step: ", i)
-            self.levenburg_marquardt_iteration(data, model_dict, weights, params_dict)
+            self.levenburg_marquardt_iteration()
 
             if i == 0:
                 prev_num_stopped_fits = xp.count_nonzero(self.fit_mask)
             else:
                 num_stopped_fits = xp.count_nonzero(self.fit_mask)
-                change = 1 - (prev_num_stopped_fits / num_stopped_fits)
-                if change < LMFit.epsilon_5:
-                    break
+                if num_stopped_fits != 0:
+                    change = 1 - (float(prev_num_stopped_fits) / float(num_stopped_fits))
+                    if change < LMFit.epsilon_5:
+                        break
                 prev_num_stopped_fits = num_stopped_fits
 
             i += 1
 
-        self.compute_cov_mat(model_dict, weights, params_dict)
-        self.fitted_params = params_dict
+        self.compute_cov_mat()
+        self.fitted_params = self.params
 
 
-    def compute_chi2(self, y_yp, weights):
+    def compute_chi2(self, y_yp):
         """
         Calculates the chi_2 values using eqn #2 from the reference document.
 
-        :param      y_yp:     data - model
-        :type       y_yp:
-        :param      weights:  The weighted residuals.
-        :type       weights:  { type_description }
+        :param      y_yp:  data - model
+        :type       y_yp:  ndarray [...,n_points,1]
+
+        :returns:   The chi_2 results.
+        :rtype:     ndarray [...,1,1]
         """
 
-        xp = get_backend(weights)
+        xp = get_backend(self.weights)
 
         y_ypt = Einsum.transpose(y_yp)
-        chi_2 = Einsum.chained_matmul(y_ypt, weights[:,:,xp.newaxis,:,:], y_yp)
-        chi_2 = Einsum.reduce_dimensions(chi_2)
+        chi_2 = Einsum.chained_matmul(y_ypt, self.weights, y_yp)
 
         return chi_2
 
-    def get_model_and_J(self, model_dict, params_dict):
+    def get_model_and_J(self, params):
         """
-        Evaluates the model with new parameters. If the user supplied function does not return
-        a Jacobian along with the evaluated function, then the central finite differences method
-        in 4.1.2 is used. Currently each iteration will use finite difference, but future
-        improvements will implement the optimizations outlined.
+        Evaluates the model with new parameters. If there is no user supplied function for a
+        Jacobian, then the central finite differences method in 4.1.2 is used. Currently each
+        iteration will use finite difference, but future improvements will implement the
+        optimizations outlined.
 
-        :param      model_dict:   model_fn : Reference to the function that yields the model and
-                                  residuals
-                                  args : possible args used by the model_fn
-        :type       model_dict:   dict
-        :param      params_dict:  Has a key for each param.
-                                  'param' : {'values','min','max'}
-        :type       params_dict:  dict
+        :param      params:  The array of parameters.
+        :type       params:  ndarray [...,n_params,1]
 
         :returns:   The model and Jacobian.
         :rtype:     dict
         """
 
-        model = model_dict['model_fn'](params_dict, **model_dict['args'])
+        xp = get_backend(self.weights)
 
-        xp = get_backend(model['model'])
+        m = self.fn(self.x_data, params, **self.kwargs)
 
-        if 'J' not in model:
-            J_shape = model['model'].shape + (self.n_params,)
-            J = xp.empty(J_shape, dtype=model['model'].dtype)
+        if isinstance(m, tuple):
+            model, J = m
+        else:
+            model = m
 
-            for i, k in enumerate(params_dict.keys()):
-                tmp_params_upper = copy.deepcopy(params_dict)
-                tmp_params_lower = copy.deepcopy(params_dict)
+            J_shape = model.shape[:-1] + (self.n_params,)
+            J = xp.empty(J_shape, dtype=model.dtype)
 
-                dp = self.delta_p * (1 + xp.abs(params_dict[k]['values']))
+            dp = self.delta_p * (1 + xp.abs(params))
+            for i in range(self.n_params):
+                dp_i = xp.zeros(params.shape)
+                dp_i[...,[i],:] = dp[...,[i],:]
 
-                tmp_params_upper[k]['values'] += dp
-                tmp_params_lower[k]['values'] -= dp
+                p_upper = params + dp_i
+                p_lower = params - dp_i
 
-                m1 = model_dict['model_fn'](tmp_params_upper, **model_dict['args'])
-                m2 = model_dict['model_fn'](tmp_params_lower, **model_dict['args'])
+                m_upper = self.fn(self.x_data, p_upper, **self.kwargs)
+                m_lower = self.fn(self.x_data, p_lower, **self.kwargs)
 
-                J[...,i] = (m1['model'] - m2['model']) / (2 * dp)
+                J[...,[i]]  = (m_upper - m_lower) / (2 * dp[...,[i],:])
 
-            model['J'] = J
+        return {'model' : model, 'J' : J}
 
-        return model
 
-    def compute_cov_mat(self, model_dict, weights, params_dict):
+    def compute_cov_mat(self):
         """
         Calculates the covariance matrix.
 
-        :param      model_dict:   model_fn : Reference to the function that yields the model and
-                                  residuals
-                                  args : possible args used by the model_fn
-        :type       model_dict:   dict
-        :param      weights:      The weighted residuals.
-        :type       weights:      ndarray
-        :param      params_dict:  Has a key for each param.
-                                  'param' : {'values','min','max'}
-        :type       params_dict:  dict
         """
 
-        xp = get_backend(weights)
+        xp = get_backend(self.weights)
 
-        model = self.get_model_and_J(model_dict, params_dict)
+        model = self.get_model_and_J(self.params)
 
         Jt = Einsum.transpose(model['J'])
-        Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
+        Jt_w = Einsum.matmul(Jt, self.weights)
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
 
         stopped_grad = xp.full(Jt_w_J.shape, False)
-        stopped_grad[...,diag,diag] = ~self.converged
+        stopped_grad[...,[diag],[diag]] = ~self.converged
         Jt_w_J[stopped_grad] = 1.0
 
         self.cov_mat = xp.linalg.inv(Jt_w_J)
 
-    def levenburg_marquardt_iteration(self, data, model_dict, weights, params_dict):
+    def levenburg_marquardt_iteration(self):
         """
         Performs a single step of the LM algorithm.
 
-        :param      data:         The measured data points.
-        :type       data:         { type_description }
-        :param      model_dict:   model_fn : Reference to the function that yields the model and
-                                  residuals
-                                  args : possible args used by the model_fn
-        :type       model_dict:   dict
-        :param      weights:      The weighted residuals.
-        :type       weights:      ndarray
-        :param      params_dict:  Has a key for each param.
-                                  'param' : {'values','min','max'}
-        :type       params_dict:  dict
         """
 
-        xp = get_backend(weights)
+        xp = get_backend(self.weights)
 
-        model = self.get_model_and_J(model_dict, params_dict)
+        model = self.get_model_and_J(self.params)
 
-        y_yp = (data[...,xp.newaxis,:] - model['model'])[...,xp.newaxis]
-        chi_2 = self.compute_chi2(y_yp, weights)
+        y_yp = (self.y_data - model['model'])
+        chi_2 = self.compute_chi2(y_yp)
 
         # Eqn #13
         Jt = Einsum.transpose(model['J'])
-        Jt_w = Einsum.matmul(Jt, weights[...,xp.newaxis,:,:])
+        Jt_w = Einsum.matmul(Jt, self.weights)
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
 
         lm_Jt_w_J_diag = xp.zeros(Jt_w_J.shape)
-        lm_Jt_w_J_diag[...,diag,diag] = (self.lm_step * Jt_w_J[...,diag,diag])
+
+        lm_Jt_w_J_diag[...,[diag],[diag]] = (self.lm_step * Jt_w_J[...,[diag],[diag]])
 
         grad = Jt_w_J + lm_Jt_w_J_diag
 
 
         # When fits converge/diverge such that the gradients tend to 0, this stops the matrix
         # from becoming singular.
-
         invertable = xp.linalg.cond(grad) < 1/xp.finfo(grad.dtype).eps
         self.fit_mask[~invertable] = True
-
         stopped_grad = xp.full(grad.shape, False)
-        stopped_grad[...,diag,diag] = self.fit_mask
+        stopped_grad[...,[diag],[diag]] = self.fit_mask
         grad[stopped_grad] = 1.0
 
 
         Jt_w_Jinv = xp.linalg.inv(grad)
         Jt_w_yyp = Einsum.matmul(Jt_w, y_yp)
         h_lm = Einsum.matmul(Jt_w_Jinv, Jt_w_yyp)
-
         del model, y_yp, Jt, Jt_w, Jt_w_J, diag, stopped_grad, grad, Jt_w_Jinv
-
 
         # Update the parameters and check whether they are in bounds. This algorithm is primarily
         # meant to fit oscillating functions so we stop fitting once a parameter goes out of bounds.
         # It is very likely that the algorithm will not be able to properly step in the chi_2 space
         # and will never converge.
-        tmp_params = copy.copy(params_dict)
-        for i, key in enumerate(tmp_params.keys()):
-            tmp_params[key] = {'values' : params_dict[key]['values'] + h_lm[...,i,:]}
+        tmp_params = self.params + h_lm
 
-            if params_dict[key]['min'] is not None:
-                d_min = tmp_params[key]['values'] < params_dict[key]['min']
+        if self.bounds:
+            minimum = bounds[0]
+            maximum = bounds[1]
 
-                if isinstance(params_dict[key]['min'], xp.ndarray):
-                    tmp_params[key]['values'][d_min] = params_dict[key]['min'][d_min]
-                else:
-                    tmp_params[key]['values'][d_min] = params_dict[key]['min']
+            d_min = tmp_params < minimum
+            d_max = tmp_params > maximum
 
+            tmp_params[d_min] = self.params[d_min]
+            tmp_params[d_max] = self.params[d_max]
 
-                self.fit_mask[d_min] = True
-
-            if params_dict[key]['max'] is not None:
-                d_max = tmp_params[key]['values'] > params_dict[key]['max']
-
-                if isinstance(params_dict[key]['max'], xp.ndarray):
-                    tmp_params[key]['values'][d_max] = params_dict[key]['max'][d_max]
-                else:
-                    tmp_params[key]['values'][d_max] = params_dict[key]['max']
-
-                self.fit_mask[d_max] = True
+            self.fit_mask[xp.any(d_min)] = True
+            self.fit_mask[xp.any(d_max)] = True
 
 
 
 
         # Eqn #16, calculating rho
-        model_new = self.get_model_and_J(model_dict, tmp_params)
+        model_new = self.get_model_and_J(tmp_params)
 
-        y_yp_new = (data[...,xp.newaxis,:] - model_new['model'])[...,xp.newaxis]
-        chi_2_new = self.compute_chi2(y_yp_new, weights)
+        y_yp_new = self.y_data - model_new['model']
+
+        chi_2_new = self.compute_chi2(y_yp_new)
         self.chi_2 = chi_2_new
 
         rho_numerator = chi_2 - chi_2_new
         rho_denominator = Einsum.matmul(Einsum.transpose(h_lm),
                                         (Einsum.matmul(lm_Jt_w_J_diag, h_lm) + Jt_w_yyp))
-        rho_denominator = Einsum.reduce_dimensions(rho_denominator)
 
         rho = rho_numerator / rho_denominator
 
@@ -327,8 +304,7 @@ class LMFit(object):
         self.fit_mask[rho == 0.0] = True
         rho[self.fit_mask] = 1.0
 
-
-        del lm_Jt_w_J_diag, Jt_w_yyp, chi_2, rho_numerator, rho_denominator,
+        del lm_Jt_w_J_diag, Jt_w_yyp, chi_2, rho_numerator, rho_denominator
 
 
 
@@ -341,23 +317,25 @@ class LMFit(object):
 
         self.lm_step = a + b
         rho_mask = (rho > LMFit.epsilon_4) & ~self.fit_mask
+        rho_mask = xp.repeat(rho_mask, self.params.shape[-2], axis=-2)
 
-        for i, key in enumerate(params_dict.keys()):
-            params_dict[key]['values'][rho_mask] = tmp_params[key]['values'][rho_mask]
-
+        self.params[rho_mask] = tmp_params[rho_mask]
 
         del a, b, rho_mask
 
 
+
+
         # 4.1.3 convergence criteria
         Jt = Einsum.transpose(model_new['J'])
-        Jt_w_yyp = Einsum.chained_matmul(Jt, weights[...,xp.newaxis,:,:], y_yp_new)
+        Jt_w_yyp = Einsum.chained_matmul(Jt, self.weights, y_yp_new)
 
-        convergence_1 = xp.abs(Jt_w_yyp).max(axis=3) < LMFit.epsilon_1
+        convergence_1 = xp.abs(Jt_w_yyp).max(axis=-2, keepdims=True) < LMFit.epsilon_1
 
-        convergence_2 = xp.abs(h_lm / rho[...,xp.newaxis,:]).max(axis=3) < LMFit.epsilon_2
+        convergence_2 = xp.abs(h_lm / rho).max(axis=-2, keepdims=True) < LMFit.epsilon_2
 
         convergence_3 = (chi_2_new / (self.m_points - self.n_params + 1)) < LMFit.epsilon_3
 
         self.converged |= convergence_1 | convergence_2 | convergence_3
+
         self.fit_mask[self.converged] = True
