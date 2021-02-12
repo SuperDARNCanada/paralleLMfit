@@ -75,12 +75,11 @@ class LMFit(object):
     iter_multiplier = 30
 
 
-    def __init__(self, fn, x_data, y_data, params, weights, bounds=None, jac=None, num_points=None, **kwargs):
+    def __init__(self, fn, x_data, y_data, params, weights, bounds=None, num_points=None, **kwargs):
         super(LMFit, self).__init__()
         xp = get_backend(weights)
 
         self.fn = fn
-        self.jac = jac
         self.kwargs = kwargs
 
         self.x_data = x_data
