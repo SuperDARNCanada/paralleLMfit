@@ -2,36 +2,36 @@ import numpy as np
 import struct
 
 DMAP_MAPPED_NUMPY = {
-1 : 'b',
-2 : 'i2',
-3 : 'i4',
-4 : 'f4',
-8 : 'f8',
-9 : 'S',
-10 : 'i8',
-16 : 'B',
-17 : 'u2',
-18 : 'u4',
-19 : 'u8',
+    1: 'b',
+    2: 'i2',
+    3: 'i4',
+    4: 'f4',
+    8: 'f8',
+    9: 'S',
+    10: 'i8',
+    16: 'B',
+    17: 'u2',
+    18: 'u4',
+    19: 'u8',
 }
 
-
 BYTES_PER_NUMPY_TYPE = {
-'b' : 1,
-'i2' : 2,
-'i4' : 4,
-'f4' : 4,
-'f8' : 8,
-'i8' : 8,
-'B' : 1,
-'u2' : 2,
-'u4' : 4,
-'u8' : 8,
+    'b': 1,
+    'i2': 2,
+    'i4': 4,
+    'f4': 4,
+    'f8': 8,
+    'i8': 8,
+    'B': 1,
+    'u2': 2,
+    'u4': 4,
+    'u8': 8,
 }
 
 
 class RawacfDmapRead(object):
     """docstring for RawacfDmapRead"""
+
     def __init__(self, filename):
         super(RawacfDmapRead, self).__init__()
 
@@ -45,7 +45,6 @@ class RawacfDmapRead(object):
 
         self.parsed_data = self.split_data_from_raw_records()
 
-
     def group_records_by_size(self):
         counter = 0
         buffer_offset = 0
@@ -55,19 +54,18 @@ class RawacfDmapRead(object):
             size = struct.unpack_from('i', self.data, buffer_offset + BYTES_PER_NUMPY_TYPE['i4'])[0]
 
             if size not in self.records_data:
-                self.records_data[size] = {'record_nums' : {}}
+                self.records_data[size] = {'record_nums': {}}
 
-            self.records_data[size]['record_nums'][counter] = {'start_offset' : buffer_offset}
+            self.records_data[size]['record_nums'][counter] = {'start_offset': buffer_offset}
 
             buffer_offset += size
             counter += 1
 
         return counter
 
-
     def build_compound_type_for_record(self, start_offset):
         compound_numpy_type = [('code', 'i4'), ('size', 'i4'), ('num_scalers', 'i4'),
-                                ('num_arrays', 'i4'), ('scalers', []), ('arrays', [])]
+                               ('num_arrays', 'i4'), ('scalers', []), ('arrays', [])]
 
         buffer_offset = 2 * BYTES_PER_NUMPY_TYPE['i4']
         num_scalers = struct.unpack_from('i', self.data, start_offset + buffer_offset)[0]
@@ -78,7 +76,7 @@ class RawacfDmapRead(object):
         buffer_offset += BYTES_PER_NUMPY_TYPE['i4']
 
         for i in range(num_scalers):
-            new_scaler = ('scaler_'+str(i), [])
+            new_scaler = ('scaler_' + str(i), [])
             str_bytes = 0
             while self.data[start_offset + buffer_offset + str_bytes] != 0:
                 str_bytes += 1
@@ -109,7 +107,7 @@ class RawacfDmapRead(object):
             buffer_offset += data_bytes
 
         for i in range(num_arrays):
-            new_array = ('array_'+str(i), [])
+            new_array = ('array_' + str(i), [])
             str_bytes = 0
             while self.data[start_offset + buffer_offset + str_bytes] != 0:
                 str_bytes += 1
@@ -140,9 +138,8 @@ class RawacfDmapRead(object):
 
         return compound_numpy_type
 
-
     def parse_raw_records(self):
-        for k,v in self.records_data.items():
+        for k, v in self.records_data.items():
             rec_nums = list(v['record_nums'].keys())
 
             offset = v['record_nums'][rec_nums[0]]['start_offset']
@@ -153,9 +150,7 @@ class RawacfDmapRead(object):
                 raw_rec = np.fromfile(self.f, dtype=type_for_record, count=1, offset=off)
                 v['record_nums'][r]['raw_record'] = raw_rec
 
-
-            #self.records_data[k]['raw_records'] = raw_records
-
+            # self.records_data[k]['raw_records'] = raw_records
 
     def split_data_from_raw_records(self):
 
@@ -166,14 +161,13 @@ class RawacfDmapRead(object):
         scalers = self.records_data[k]['record_nums'][0]['raw_record']['scalers']
         arrays = self.records_data[k]['record_nums'][0]['raw_record']['arrays']
 
-
         for scaler in scalers[0]:
             groups[scaler[0]] = [None] * self.total_records
 
         for array in arrays[0]:
             groups[array[0]] = [None] * self.total_records
 
-        for k,v in self.records_data.items():
+        for k, v in self.records_data.items():
 
             for i, r in v['record_nums'].items():
                 record = r['raw_record']
@@ -187,22 +181,22 @@ class RawacfDmapRead(object):
         for scaler in record['scalers'][0]:
             groups[scaler[0]] = np.array(groups[scaler[0]])
 
-        max_ptab_dim = [self.total_records,0]
+        max_ptab_dim = [self.total_records, 0]
         ptab_type = None
 
-        max_ltab_dim = [self.total_records,0,2]
+        max_ltab_dim = [self.total_records, 0, 2]
         ltab_type = None
 
-        max_slist_dim = [self.total_records,0]
+        max_slist_dim = [self.total_records, 0]
         slist_type = None
 
-        max_pwr0_dim = [self.total_records,0]
+        max_pwr0_dim = [self.total_records, 0]
         pwr0_type = None
 
-        max_acfd_dim = [self.total_records,0,0,2]
+        max_acfd_dim = [self.total_records, 0, 0, 2]
         acfd_type = None
 
-        max_xcfd_dim = [self.total_records,0,0,2]
+        max_xcfd_dim = [self.total_records, 0, 0, 2]
         xcfd_type = None
 
         for array in arrays[0]:
@@ -241,39 +235,37 @@ class RawacfDmapRead(object):
         acfd = np.zeros(max_acfd_dim, dtype=acfd_type)
         xcfd = np.zeros(max_xcfd_dim, dtype=xcfd_type)
 
-
         for array in arrays[0]:
             name = array[0]
 
-            for i,arr in enumerate(groups[name]):
+            for i, arr in enumerate(groups[name]):
                 if name == b"ptab":
                     ptab_dim = arr.shape[0]
-                    ptab[i,:ptab_dim] = arr
+                    ptab[i, :ptab_dim] = arr
                 elif name == b"ltab":
                     ltab_dim = arr.shape[0]
-                    ltab[i,:ltab_dim] = arr
+                    ltab[i, :ltab_dim] = arr
                     # mask the alternate lag 0
-                    ltab_mask[i,:ltab_dim-1] = True
+                    ltab_mask[i, :ltab_dim - 1] = True
                 elif name == b"slist":
                     slist_dim = arr.shape[0]
-                    slist[i,arr] = arr
-                    slist_mask[i,arr] = True
+                    slist[i, arr] = arr
+                    slist_mask[i, arr] = True
                 else:
                     continue
 
-
         for array in arrays[0]:
             name = array[0]
 
-            for i,arr in enumerate(groups[name]):
+            for i, arr in enumerate(groups[name]):
                 if name == b"pwr0":
                     pwr0[i, slist_mask[i] == True] = arr
                 elif name == b"acfd":
                     acfd_dim_2 = arr.shape[1]
-                    acfd[i,slist_mask[i] == True,:acfd_dim_2,:] = arr
+                    acfd[i, slist_mask[i] == True, :acfd_dim_2, :] = arr
                 elif name == b"xcfd":
                     xcfd_dim_2 = arr.shape[1]
-                    xcfd[i,slist_mask[i] == True,:xcfd_dim_2,:] = arr
+                    xcfd[i, slist_mask[i] == True, :xcfd_dim_2, :] = arr
                 else:
                     continue
 
@@ -286,9 +278,8 @@ class RawacfDmapRead(object):
 
         data_mask = np.full(ltab_mask.shape + (slist_mask.shape[-1],), False, dtype=bool)
 
-        ltab_mask = np.resize(ltab_mask[...,np.newaxis], data_mask.shape)
-        slist_mask = np.resize(slist_mask[...,np.newaxis,np.newaxis,:], data_mask.shape)
-
+        ltab_mask = np.resize(ltab_mask[..., np.newaxis], data_mask.shape)
+        slist_mask = np.resize(slist_mask[..., np.newaxis, np.newaxis, :], data_mask.shape)
 
         data_mask |= ltab_mask
         data_mask &= slist_mask
@@ -296,12 +287,10 @@ class RawacfDmapRead(object):
         groups[b"data_mask"] = data_mask
 
         g = {}
-        for k,v in groups.items():
+        for k, v in groups.items():
             g[k.decode('utf-8')] = v
 
         return g
 
     def get_parsed_data(self):
         return self.parsed_data
-
-
