@@ -60,23 +60,45 @@ class LMFit(object):
     This implementation extends the vectorization to performing fits on multiple data sets and
     multiple models simultaneously"""
 
-    epsilon_1 = 1e-3
-    epsilon_2 = 1e-3
-    epsilon_3 = 1e-1
-    epsilon_4 = 1e-1
-    epsilon_5 = 2.5e-3  # new constant introduced.
+    epsilon_1 = 1e-3    # Convergence criteria - gradient approaching zero
+    epsilon_2 = 1e-3    # Convergence criteria - parameters have stagnated
+    epsilon_3 = 1e-1    # Convergence criteria - reduced chi-squared value approaching zero
+    epsilon_4 = 1e-1    # Acceptance threshold for an LM update step
+    epsilon_5 = 2.5e-3  # New constant introduced - threshold for stopping fitting based on newly finished/failed fits
 
-    L_0 = 1e-2
-    L_increase = 11
-    L_decrease = 9
-    L_max = 1e7
-    L_min = 1e-7
+    L_0 = 1e-2          # Initial value for lambda
+    L_increase = 11     # Factor to increase lambda by after rejected step
+    L_decrease = 9      # Factor to reduce lambda by after accepted step
+    L_max = 1e7         # Max value for lambda
+    L_min = 1e-7        # Min value for lambda
 
-    delta_p = 0.001
+    delta_p = 0.001     # For computing numerical derivatives
 
-    iter_multiplier = 30
+    iter_multiplier = 30    # This times n_params = max number of iterations to do
 
     def __init__(self, fn, x_data, y_data, params, weights, bounds=None, num_points=None, **kwargs):
+        """
+        Uses the Levenberg-Marquardt weighted least-squares fitting algorithm to find the optimal parameters which
+        minimize the chi-squared value of a non-linear function. This implementation is able to find the optimal
+        parameters for many same-length datasets in parallel.
+
+        :param fn:         User-specified model function
+        :type  fn:         Callable, with signature fn(x_data, params, **kwargs): model_data[, Jacobian]
+        :param x_data:     Independent variable values
+        :type  x_data:     ndarray [..., m_points]
+        :param y_data:     Dependent variable values
+        :type  y_data:     ndarray [..., m_points]
+        :param params:     Parameters to vary for fitting
+        :type  params:     ndarray [..., n_params, 1]
+        :param weights:    Weighting factors
+        :type  weights:    ndarray [..., m_points, m_points]
+        :param bounds:     Upper and lower bounds for params
+        :type  bounds:     ndarray [2, n_params]
+        :param num_points: Number of data points for each data set.
+        :type  num_points: ndarray [..., 1]
+        :param kwargs:     Extra arguments as needed for fn
+        :type  kwargs:     dict
+        """
         super(LMFit, self).__init__()
         xp = get_backend(weights)
 
@@ -90,8 +112,10 @@ class LMFit(object):
         self.bounds = bounds
 
         lm_step_shape = self.params.shape[:-2] + (1, 1)
+        # [..., 1, 1]
         self.lm_step = xp.ones(lm_step_shape) * LMFit.L_0
 
+        # Array of flags which indicate if a given dataset has converged
         self.converged = xp.full(lm_step_shape, False)
 
         # Using matrix operations, it's not possible to selectively perform fits. Masks are used
@@ -102,13 +126,19 @@ class LMFit(object):
 
         if num_points is not None:
             tmp_points = xp.array(xp.broadcast_to(num_points, lm_step_shape))
+            # [..., 1, 1]
             self.fit_mask[tmp_points <= 0] = True
 
+            # All datasets with invalid number of points cannot be fitted, so output params are set to input params.
             tmp_points[tmp_points <= 0] = self.n_params
+
+            # Number of data points in each dataset
             self.m_points = tmp_points
         else:
+            # Same number of points (m_points) in each dataset
             self.m_points = y_data.shape[-2]
 
+        # Max number of iterations set by number of variable parameters
         n_iters = self.n_params * LMFit.iter_multiplier
 
         self.cov_mat = None
@@ -124,11 +154,20 @@ class LMFit(object):
             self.levenburg_marquardt_iteration()
 
             if i == 0:
+                # This will be any datasets with num_points <= 0 or that stop on first iteration
                 prev_num_stopped_fits = xp.count_nonzero(self.fit_mask)
             else:
+                # Number of datasets that converged/failed by the end of this iteration
                 num_stopped_fits = xp.count_nonzero(self.fit_mask)
                 if num_stopped_fits != 0:
+                    # TODO: Does this mean that if any fits previously stopped (such as if num_points <= 0
+                    #  off the gun) and no new fits stopped this iteration, it will break?
+                    #  e.g. we have prev_num_stopped_fits = x since num_points = 0 for some datasets,
+                    #  then when i=1 if no new fits have stopped then change = 1-(x/x) = 0 < epsilon_5,
+                    #  so the whole thing stops.
                     change = 1 - (float(prev_num_stopped_fits) / float(num_stopped_fits))
+                    # Break if the number of fits which stopped this iteration is small compared to
+                    # total number of stopped fits
                     if change < LMFit.epsilon_5:
                         break
                 prev_num_stopped_fits = num_stopped_fits
@@ -143,12 +182,13 @@ class LMFit(object):
         Calculates the chi_2 values using eqn #2 from the reference document.
 
         :param      y_yp:  data - model
-        :type       y_yp:  ndarray [...,n_points,1]
+        :type       y_yp:  ndarray [..., m_points, 1]
 
         :returns:   The chi_2 results.
-        :rtype:     ndarray [...,1,1]
+        :rtype:     ndarray [..., 1, 1]
         """
 
+        # TODO: This doesn't get used, can remove it
         xp = get_backend(self.weights)
 
         y_ypt = Einsum.transpose(y_yp)
@@ -164,7 +204,7 @@ class LMFit(object):
         optimizations outlined.
 
         :param      params:  The array of parameters.
-        :type       params:  ndarray [...,n_params,1]
+        :type       params:  ndarray [..., n_params, 1]
 
         :returns:   The model and Jacobian.
         :rtype:     dict
@@ -177,13 +217,16 @@ class LMFit(object):
         if isinstance(m, tuple):
             model, J = m
         else:
+            # [..., m_points]
             model = m
 
             J_shape = model.shape[:-1] + (self.n_params,)
+            # [..., n_params]
             J = xp.empty(J_shape, dtype=model.dtype)
 
             dp = self.delta_p * (1 + xp.abs(params))
             for i in range(self.n_params):
+                # [..., n_params, m_points]
                 dp_i = xp.zeros(params.shape)
                 dp_i[..., [i], :] = dp[..., [i], :]
 
@@ -193,6 +236,7 @@ class LMFit(object):
                 m_upper = self.fn(self.x_data, p_upper, **self.kwargs)
                 m_lower = self.fn(self.x_data, p_lower, **self.kwargs)
 
+                # Central difference method
                 J[..., [i]] = (m_upper - m_lower) / (2 * dp[..., [i], :])
 
         return {'model': model, 'J': J}
@@ -207,12 +251,15 @@ class LMFit(object):
 
         model = self.get_model_and_J(self.params)
 
+        # [..., n_params, m_points] x [..., m_points, m_points] x [..., m_points, n_params]
+        # = [..., n_params, n_params]
         Jt = Einsum.transpose(model['J'])
         Jt_w = Einsum.matmul(Jt, self.weights)
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
 
+        # Set covariance matrix diagonals to 1.0 for all converged datasets
         stopped_grad = xp.full(Jt_w_J.shape, False)
         stopped_grad[..., [diag], [diag]] = ~self.converged
         Jt_w_J[stopped_grad] = 1.0
@@ -233,6 +280,8 @@ class LMFit(object):
         chi_2 = self.compute_chi2(y_yp)
 
         # Eqn #13
+        # [..., n_params, m_points] x [..., m_points, m_points] x [..., m_points, n_params]
+        # = [..., n_params, n_params]
         Jt = Einsum.transpose(model['J'])
         Jt_w = Einsum.matmul(Jt, self.weights)
         Jt_w_J = Einsum.matmul(Jt_w, model['J'])
@@ -243,18 +292,26 @@ class LMFit(object):
 
         lm_Jt_w_J_diag[..., [diag], [diag]] = (self.lm_step * Jt_w_J[..., [diag], [diag]])
 
+        # [..., n_params, n_params]
         grad = Jt_w_J + lm_Jt_w_J_diag
 
         # When fits converge/diverge such that the gradients tend to 0, this stops the matrix
         # from becoming singular.
-        invertable = xp.linalg.cond(grad) < 1 / xp.finfo(grad.dtype).eps
-        self.fit_mask[~invertable] = True
+        invertible = xp.linalg.cond(grad) < 1 / xp.finfo(grad.dtype).eps
+        self.fit_mask[~invertible] = True
         stopped_grad = xp.full(grad.shape, False)
         stopped_grad[..., [diag], [diag]] = self.fit_mask
         grad[stopped_grad] = 1.0
 
+        # [..., n_params, n_params]
         Jt_w_Jinv = xp.linalg.inv(grad)
+
+        # [..., n_params, m_points] x [..., m_points, 1]
+        # = [..., n_params, 1]
         Jt_w_yyp = Einsum.matmul(Jt_w, y_yp)
+
+        # [..., n_params, n_params] x [..., n_params, 1]
+        # = [..., n_params, 1]
         h_lm = Einsum.matmul(Jt_w_Jinv, Jt_w_yyp)
         del model, y_yp, Jt, Jt_w, Jt_w_J, diag, stopped_grad, grad, Jt_w_Jinv
 
@@ -262,11 +319,13 @@ class LMFit(object):
         # meant to fit oscillating functions so we stop fitting once a parameter goes out of bounds.
         # It is very likely that the algorithm will not be able to properly step in the chi_2 space
         # and will never converge.
+
+        # [..., n_params, 1]
         tmp_params = self.params + h_lm
 
         if self.bounds:
-            minimum = bounds[0]
-            maximum = bounds[1]
+            minimum = self.bounds[0]
+            maximum = self.bounds[1]
 
             d_min = tmp_params < minimum
             d_max = tmp_params > maximum
@@ -286,6 +345,8 @@ class LMFit(object):
         self.chi_2 = chi_2_new
 
         rho_numerator = chi_2 - chi_2_new
+        # [..., 1, n_params] x ([..., n_params, n_params] x [..., n_params, 1] + [..., n_params, 1])
+        # = [..., 1, 1]
         rho_denominator = Einsum.matmul(Einsum.transpose(h_lm),
                                         (Einsum.matmul(lm_Jt_w_J_diag, h_lm) + Jt_w_yyp))
 
@@ -308,6 +369,7 @@ class LMFit(object):
         rho_mask = (rho > LMFit.epsilon_4) & ~self.fit_mask
         rho_mask = xp.repeat(rho_mask, self.params.shape[-2], axis=-2)
 
+        # Accept new parameters for iterations which bettered the rho metric significantly
         self.params[rho_mask] = tmp_params[rho_mask]
 
         del a, b, rho_mask
