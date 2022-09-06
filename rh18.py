@@ -280,7 +280,7 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
 
 def calculate_t(lags, mpinc):
     """
-    Calculates the time  for each lag given the fundamental spacing in time. Also trim out the
+    Calculates the time for each lag given the fundamental spacing in time. Also trim out the
     alternate lag 0.
 
     :param      lags:   The experiment lag table.
@@ -356,10 +356,10 @@ def calculate_initial_W(array_shape):
     Fills the initial spectral width guesses.
 
     :param      array_shape:  The array shape
-    :type       array_shape:  ndarray [num_records, 1, num_models, 1]
+    :type       array_shape:  ndarray [num_records, 1, num_models]
 
     :returns:   The initial W guesses.
-    :rtype:     ndarray [num_records, 1, num_models, 1]
+    :rtype:     ndarray [num_records, 1, num_models]
     """
 
     W = xp.ones(array_shape) * 200.0
@@ -399,27 +399,29 @@ def calculate_initial_V(wavelength, num_velocity_models, mpinc):
     # [num_records, 1, num_models]
     nyquist_v_steps = (-1 * nyquist_v) + tmp
 
-    nyquist_v_steps = nyquist_v_steps[..., xp.newaxis]
+    # nyquist_v_steps = nyquist_v_steps[..., xp.newaxis]
 
     return nyquist_v_steps
 
 
-def compute_model_and_derivatives(params, **kwargs):
+def compute_model_and_derivatives(x_data, params, **kwargs):
     """
     Calculates the model and derivatives used for fitting.
 
+    :param      x_data:  The independent variable values (unused)
+    :type       x_data:  ndarray [..., m_points]
     :param      params:  The parameters that are being fit for.
-    :type       params:  dict of fitting params.
+    :type       params:  ndarray [..., n_params, 1]
     :param      kwargs:  The additional keywords arguments that will be supplied by the fitter.
     :type       kwargs:  dict that holds the model constants
 
     :returns:   The computed model and associated derivatives.
-    :rtype:     dict of model and derivatives
+    :rtype:     tuple of model and derivatives
     """
 
-    p0 = params['p0']['values']
-    W = params['W']['values']
-    V = params['V']['values']
+    p0 = params[..., [0], :]
+    W = params[..., [1], :]
+    V = params[..., [2], :]
 
     model_constant_W = kwargs['W']
     model_constant_V = kwargs['V']
@@ -431,32 +433,24 @@ def compute_model_and_derivatives(params, **kwargs):
     # [num_records, num_ranges, num_models, 1]
     model = p0 * xp.exp(model_constant_W * W) * xp.exp(model_constant_V * V)
 
-    J = xp.repeat(model[..., xp.newaxis], 3, axis=-1)
+    J = xp.repeat(model, 3, axis=-1)
 
     # [num_records, num_ranges, num_models, num_lags]
     # [num_records, num_ranges, num_models, 1]
-    J[:, :, :, :, 0] /= p0
+    J[..., [0]] /= p0
 
     # [num_records, num_ranges, num_models, num_lags]
     # [num_records, num_ranges, num_models, 1]
-    J[:, :, :, :, 1] *= model_constant_W
+    J[..., [1]] *= model_constant_W
 
     # [num_records, num_ranges, num_models, num_lags]
     # [num_records, num_ranges, num_models, 1]
-    J[:, :, :, :, 2] *= model_constant_V
+    J[..., [2]] *= model_constant_V
 
-    model_dict = {}
-    model = xp.concatenate((model.real, model.imag), axis=-1)
-
-    # [num_records, num_ranges, num_models, num_lags*2]
-    model_dict['model'] = model
-
+    model = xp.concatenate((model.real, model.imag), axis=-2)
     J = xp.concatenate((J.real, J.imag), axis=-2)
 
-    # [num_records, num_ranges, num_models, num_lags*2, 3]
-    model_dict['J'] = J
-
-    return model_dict
+    return model, J
 
 
 def fit_all_records(records_data):
@@ -499,26 +493,24 @@ def fit_all_records(records_data):
 
     noise = determine_noise(pwr0)
 
-    pulses_as_samples, samples_for_lags = calculate_samples(num_range_gates, lags, pulses,
-                                                            mpinc, lagfr, smsep)
-    blanking_mask = create_blanking_mask(num_range_gates, pulses_as_samples, samples_for_lags,
-                                         data_mask, num_averages)
+    pulses_as_samples, samples_for_lags = calculate_samples(num_range_gates, lags, pulses, mpinc, lagfr, smsep)
+    blanking_mask = create_blanking_mask(num_range_gates, pulses_as_samples, samples_for_lags, data_mask, num_averages)
 
     good_points = xp.count_nonzero(blanking_mask == False, axis=-1)
     good_points = good_points[..., xp.newaxis, xp.newaxis]
 
-    clutter = estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags,
-                                        pwr0, lagfr, smsep, data_mask)
+    clutter = estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_lags, pwr0, lagfr, smsep,
+                                        data_mask)
     fo_weights = first_order_weights(pwr0, noise, clutter, num_averages, blanking_mask)
 
     model_constants = calculate_constants(wavelength, t)
 
     initial_V = calculate_initial_V(wavelength, num_velocity_models, mpinc)
     initial_W = calculate_initial_W(initial_V.shape)
-    initial_p0 = pwr0[..., xp.newaxis, xp.newaxis]
+    initial_p0 = pwr0[..., xp.newaxis]
 
     total_records = pwr0.shape[0]
-    consistent_shape = (total_records, num_range_gates, num_velocity_models, 1)
+    consistent_shape = (total_records, num_range_gates, num_velocity_models)
 
     initial_V = xp.broadcast_to(initial_V, consistent_shape).copy()
     initial_W = xp.broadcast_to(initial_W, consistent_shape).copy()
@@ -526,8 +518,6 @@ def fit_all_records(records_data):
 
     even_chunks = total_records // step
     remainder = total_records - (even_chunks * step)
-
-    fits = []
 
     def do_fits(args):
         """
@@ -537,33 +527,37 @@ def fit_all_records(records_data):
         start = args[0]
         stop = args[1]
 
+        # [num_records, num_ranges, num_models]
+        p0_i = initial_p0[start:stop, ...]
         W_i = initial_W[start:stop, ...]
         V_i = initial_V[start:stop, ...]
-        p0_i = initial_p0[start:stop, ...]
 
-        V_upper_bound = xp.repeat(initial_V[start:stop, :, -1, xp.newaxis], num_velocity_models, axis=2)
-        V_lower_bound = xp.repeat(initial_V[start:stop, :, 0, xp.newaxis], num_velocity_models, axis=2)
+        # [num_records, num_ranges, num_models]
+        params = xp.stack([p0_i, W_i, V_i], axis=-1)
 
-        params = {'p0': {'values': p0_i, 'min': 0.0001, 'max': None},
-                  'W': {'values': W_i, 'min': -200.0, 'max': 8000.0},
-                  'V': {'values': V_i, 'min': V_lower_bound, 'max': V_upper_bound}}
+        # hardcoded lower and upper bounds for pwr0, spectral width, and LOS velocity
+        bounds = xp.array([[0.0001, -200.0, initial_V[0, 0, 0]], [xp.inf, 8000.0, initial_V[0, 0, -1]]])
+        bounds = xp.transpose(bounds)
 
-        W_constant_i = model_constants['W'][start:stop, ...]
-        V_constant_i = model_constants['V'][start:stop, ...]
-
-        model_constants_i = {'W': W_constant_i,
-                             'V': V_constant_i}
-        model_dict = {'model_fn': compute_model_and_derivatives, 'args': model_constants_i}
+        W_constant_i = model_constants['W'][start:stop, ..., xp.newaxis]
+        V_constant_i = model_constants['V'][start:stop, ..., xp.newaxis]
 
         weights = fo_weights[start:stop, ...]
 
         acf_i = acf[start:stop, ...]
 
-        lm_step_shape = (stop - start, num_range_gates, num_velocity_models, 1)
+        num_records = stop - start
+        num_ranges = acf_i.shape[1]
+        n_points = t.shape[-1]
 
-        gp = good_points[start:stop, ...]
+        x_data = xp.repeat(t, 2, axis=-1)
+        x_data = xp.reshape(x_data, (num_records, 1, 1, n_points*2))
+        y_data = xp.broadcast_to(acf_i[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points*2))
+        weights = xp.reshape(weights[..., xp.newaxis, :, :], (num_records, num_ranges, 1, n_points*2, n_points*2))
+        num_points = good_points[start:stop, ...]
 
-        return data_fitting.LMFit(acf_i, model_dict, weights, params, lm_step_shape, gp)
+        return data_fitting.LMFit(compute_model_and_derivatives, x_data, y_data, params, weights,
+                                  bounds=bounds, num_points=num_points, W=W_constant_i, V=V_constant_i)
 
     argv = []
     if even_chunks > 0:
@@ -580,11 +574,18 @@ def fit_all_records(records_data):
     tmp = ([], [], [], [], [], [])
 
     for f in fits:
-        tmp[0].append(f.fitted_params['p0']['values'])
-        tmp[1].append(f.fitted_params['W']['values'])
-        tmp[2].append(f.fitted_params['V']['values'])
-        tmp[3].append(f.cov_mat)
-        tmp[4].append(f.converged)
+        # print('fitted_params: ', f.fitted_params.shape)
+        # print('chi_2: ', f.chi_2.shape)
+        # print('cov_mat: ', f.cov_mat.shape)
+        print('converged: ', xp.count_nonzero(f.converged))
+        print('good_fits: ', xp.count_nonzero(xp.any(f.converged, axis=-3)))
+
+        best_fit_idx = xp.argmin(f.chi_2, axis=2, keepdims=True)
+        tmp[0].append(f.fitted_params[..., best_fit_idx, 0, :])
+        tmp[1].append(f.fitted_params[..., best_fit_idx, 1, :])
+        tmp[2].append(f.fitted_params[..., best_fit_idx, 2, :])
+        tmp[3].append(f.cov_mat[..., best_fit_idx, :, :])
+        tmp[4].append(f.converged[..., best_fit_idx, :, :])
         tmp[5].append(f.chi_2)
 
     fitted_data = {'p0': xp.vstack(tmp[0]),
@@ -655,4 +656,4 @@ if __name__ == '__main__':
     output_name[-1] = 'rh18.hdf5'
     output_name = ".".join(output_name)
 
-    write_to_file(records_data, fitted_data, output_name)
+    # write_to_file(records_data, fitted_data, output_name)

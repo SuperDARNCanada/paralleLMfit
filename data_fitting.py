@@ -89,15 +89,18 @@ class LMFit(object):
         :param y_data:     Dependent variable values
         :type  y_data:     ndarray [..., m_points]
         :param params:     Parameters to vary for fitting
-        :type  params:     ndarray [..., n_params, 1]
+        :type  params:     ndarray [..., n_params]
         :param weights:    Weighting factors
         :type  weights:    ndarray [..., m_points, m_points]
         :param bounds:     Upper and lower bounds for params
-        :type  bounds:     ndarray [2, n_params]
+        :type  bounds:     ndarray [..., n_params, 2]
         :param num_points: Number of data points for each data set.
-        :type  num_points: ndarray [..., 1]
+        :type  num_points: ndarray [...]
         :param kwargs:     Extra arguments as needed for fn
         :type  kwargs:     dict
+
+        The array dimensions of inputs for this function must be broadcastable to one another, as described in
+        https://numpy.org/doc/stable/user/basics.broadcasting.html
         """
         super(LMFit, self).__init__()
         xp = get_backend(weights)
@@ -105,13 +108,15 @@ class LMFit(object):
         self.fn = fn
         self.kwargs = kwargs
 
-        self.x_data = x_data
-        self.y_data = y_data
-        self.params = params
+        # The reshaping below is to allow for proper matrix calculations
+        self.x_data = x_data[..., xp.newaxis]
+        self.y_data = y_data[..., xp.newaxis]
+        self.params = params[..., xp.newaxis]
         self.weights = weights
         self.bounds = bounds
 
         lm_step_shape = self.params.shape[:-2] + (1, 1)
+
         # [..., 1, 1]
         self.lm_step = xp.ones(lm_step_shape) * LMFit.L_0
 
@@ -121,11 +126,13 @@ class LMFit(object):
         # Using matrix operations, it's not possible to selectively perform fits. Masks are used
         # to avoid fitting issues when fits have finished or failed.
         self.fit_mask = xp.full(lm_step_shape, False)
+        print('Total fits: ', self.fit_mask.size)
 
         self.n_params = self.params.shape[-2]
 
         if num_points is not None:
-            tmp_points = xp.array(xp.broadcast_to(num_points, lm_step_shape))
+            tmp_points = xp.array(xp.broadcast_to(num_points[..., xp.newaxis], lm_step_shape))
+
             # [..., 1, 1]
             self.fit_mask[tmp_points <= 0] = True
 
@@ -323,9 +330,9 @@ class LMFit(object):
         # [..., n_params, 1]
         tmp_params = self.params + h_lm
 
-        if self.bounds:
-            minimum = self.bounds[0]
-            maximum = self.bounds[1]
+        if self.bounds is not None:
+            minimum = self.bounds[..., [0]]
+            maximum = self.bounds[..., [1]]
 
             d_min = tmp_params < minimum
             d_max = tmp_params > maximum
@@ -333,8 +340,8 @@ class LMFit(object):
             tmp_params[d_min] = self.params[d_min]
             tmp_params[d_max] = self.params[d_max]
 
-            self.fit_mask[xp.any(d_min)] = True
-            self.fit_mask[xp.any(d_max)] = True
+            self.fit_mask[xp.any(d_min, axis=-2)] = True
+            self.fit_mask[xp.any(d_max, axis=-2)] = True
 
         # Eqn #16, calculating rho
         model_new = self.get_model_and_J(tmp_params)
@@ -345,10 +352,9 @@ class LMFit(object):
         self.chi_2 = chi_2_new
 
         rho_numerator = chi_2 - chi_2_new
-        # [..., 1, n_params] x ([..., n_params, n_params] x [..., n_params, 1] + [..., n_params, 1])
+        # [..., 1, n_params] x ( [..., n_params, n_params] x [..., n_params, 1] + [..., n_params, 1] )
         # = [..., 1, 1]
-        rho_denominator = Einsum.matmul(Einsum.transpose(h_lm),
-                                        (Einsum.matmul(lm_Jt_w_J_diag, h_lm) + Jt_w_yyp))
+        rho_denominator = Einsum.matmul(Einsum.transpose(h_lm), (Einsum.matmul(lm_Jt_w_J_diag, h_lm) + Jt_w_yyp))
 
         rho = rho_numerator / rho_denominator
 

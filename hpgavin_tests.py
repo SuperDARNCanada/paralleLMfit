@@ -7,7 +7,7 @@ n_points = 100
 num_models = 20
 msmnt_err = 0.5
 
-t = np.arange(n_points)[np.newaxis, :, np.newaxis]
+t = np.arange(n_points)[np.newaxis, :]
 
 weights = np.zeros((num_models, n_points, n_points))
 diag = np.arange(n_points)
@@ -48,10 +48,10 @@ def example_3_model(x_data, params, **kwargs):
     return m
 
 
-def make_paramater_grids(p_true):
-    p_true = p_true[np.newaxis, :, np.newaxis]
+def make_parameter_grids(p_true):
+    p_true = p_true[np.newaxis, :]
     grid = np.repeat(p_true, num_models, axis=0)
-    step = (p_true / num_models * 2) * (1 + np.arange(num_models)[:, np.newaxis, np.newaxis])
+    step = (p_true / num_models * 2) * (1 + np.arange(num_models)[:, np.newaxis])
 
     p1_grid = np.copy(grid)
     p1_grid[:, 0] = step[:, 0]
@@ -77,11 +77,11 @@ def make_paramater_grids(p_true):
 
 
 def make_chi_2(p_grids, fn):
-    m0 = fn(t, p_grids['p_true'])
-    m1 = fn(t, p_grids['p1_grid'])
-    m2 = fn(t, p_grids['p2_grid'])
-    m3 = fn(t, p_grids['p3_grid'])
-    m4 = fn(t, p_grids['p4_grid'])
+    m0 = fn(t, p_grids['p_true'][..., np.newaxis])
+    m1 = fn(t, p_grids['p1_grid'][..., np.newaxis])
+    m2 = fn(t, p_grids['p2_grid'][..., np.newaxis])
+    m3 = fn(t, p_grids['p3_grid'][..., np.newaxis])
+    m4 = fn(t, p_grids['p4_grid'][..., np.newaxis])
 
     n_params = 4
     c1 = np.sum(np.power((m0 - m1), 2), axis=-2, keepdims=True) / (n_points - n_params)
@@ -101,12 +101,13 @@ def make_chi_2(p_grids, fn):
 def do_example_1():
     p_true = np.array([20.0, 10.0, 1.0, 50.0])
 
-    grids = make_paramater_grids(p_true)
+    grids = make_parameter_grids(p_true)
 
     chi_2 = make_chi_2(grids, example_1_model)
 
-    y_true = example_1_model(t, grids['p_true'])
+    y_true = example_1_model(t[..., np.newaxis], grids['p_true'][..., np.newaxis])
     y_data = y_true + (msmnt_err * np.random.randn(*y_true.shape))
+    y_data = y_data.reshape(y_data.shape[:-1])
 
     fitted_results = data_fitting.LMFit(example_1_model, t, y_data, grids['full_grid'], weights)
 
@@ -114,12 +115,13 @@ def do_example_1():
 def do_example_2():
     p_true = np.array([20.0, -24.0, 30.0, -40.0])
 
-    grids = make_paramater_grids(p_true)
+    grids = make_parameter_grids(p_true)
 
     chi_2 = make_chi_2(grids, example_2_model)
 
-    y_true = example_2_model(t, grids['p_true'])
+    y_true = example_2_model(t[..., np.newaxis], grids['p_true'][..., np.newaxis])
     y_data = y_true + (msmnt_err * np.random.randn(*y_true.shape))
+    y_data = y_data.reshape(y_data.shape[:-1])
 
     fitted_results = data_fitting.LMFit(example_2_model, t, y_data, grids['full_grid'], weights)
 
@@ -127,12 +129,13 @@ def do_example_2():
 def do_example_3():
     p_true = np.array([6.0, 20.0, 1.0, 5.0])
 
-    grids = make_paramater_grids(p_true)
+    grids = make_parameter_grids(p_true)
 
     chi_2 = make_chi_2(grids, example_3_model)
 
-    y_true = example_3_model(t, grids['p_true'])
+    y_true = example_3_model(t[..., np.newaxis], grids['p_true'][..., np.newaxis])
     y_data = y_true + (msmnt_err * np.random.randn(*y_true.shape))
+    y_data = y_data.reshape(y_data.shape[:-1])
 
     fitted_results = data_fitting.LMFit(example_3_model, t, y_data, grids['full_grid'], weights)
 
