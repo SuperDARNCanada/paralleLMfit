@@ -43,7 +43,7 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
     :type       blanking_mask:  ndarray [num_records, num_ranges, num_lags*2]
 
     :returns:   The first order weights to use during fitting.
-    :rtype:     ndarray [num_records, num_ranges, num_lags*2, num_lags*2]
+    :rtype:     ndarray [num_records, num_ranges, num_lags*2]
     """
 
     # [num_records, 1, num_ranges]
@@ -60,26 +60,15 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
     # [num_records, num_ranges, num_lags+1]
     error = error[..., :-1]
 
-    weights_shape = (error.shape[0], error.shape[1], error.shape[2] * 2, error.shape[2] * 2)
-    # [num_records, num_ranges, num_lags*2, num_lags*2]
+    weights_shape = (error.shape[0], error.shape[1], error.shape[2] * 2)
+    # [num_records, num_ranges, num_lags*2]
     weights = xp.zeros(weights_shape)
 
-    diag = xp.arange(weights.shape[-1])
-    diag_r = diag[0:error.shape[2]]
-    diag_i = diag[error.shape[2]:]
-
-    # Example of assigning weights
-    # [r1 0 0 0 0 0]   [e1 0 0 0 0 0]
-    # [0 r2 0 0 0 0]   [0 e2 0 0 0 0]
-    # [0 0 r3 0 0 0] = [0 0 e3 0 0 0]
-    # [0 0 0 i1 0 0]   [0 0 0 e1 0 0]
-    # [0 0 0 0 i2 0]   [0 0 0 0 e2 0]
-    # [0 0 0 0 0 i3]   [0 0 0 0 0 e3]
-    weights[..., diag_r, diag_r] = 1.0 / error ** 2
-    weights[..., diag_i, diag_i] = 1.0 / error ** 2
+    weights[..., 0:error.shape[2]] = 1.0 / error ** 2
+    weights[..., error.shape[2]:] = 1.0 / error ** 2
 
     # [num_records, num_ranges, num_lags*2]
-    weights[..., diag, diag][blanking_mask] = 1e-20
+    weights[..., :][blanking_mask] = 1e-20
 
     return weights
 
@@ -550,10 +539,10 @@ def fit_all_records(records_data):
         num_ranges = acf_i.shape[1]
         n_points = t.shape[-1]
 
-        x_data = xp.repeat(t, 2, axis=-1)
+        x_data = xp.repeat(t[start:stop, ...], 2, axis=-1)
         x_data = xp.reshape(x_data, (num_records, 1, 1, n_points*2))
         y_data = xp.broadcast_to(acf_i[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points*2))
-        weights = xp.reshape(weights[..., xp.newaxis, :, :], (num_records, num_ranges, 1, n_points*2, n_points*2))
+        weights = xp.reshape(weights[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points*2))
         num_points = good_points[start:stop, ...]
 
         return data_fitting.LMFit(compute_model_and_derivatives, x_data, y_data, params, weights,
@@ -656,4 +645,4 @@ if __name__ == '__main__':
     output_name[-1] = 'rh18.hdf5'
     output_name = ".".join(output_name)
 
-    # write_to_file(records_data, fitted_data, output_name)
+    write_to_file(records_data, fitted_data, output_name)

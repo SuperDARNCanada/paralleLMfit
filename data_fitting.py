@@ -91,7 +91,7 @@ class LMFit(object):
         :param params:     Parameters to vary for fitting
         :type  params:     ndarray [..., n_params]
         :param weights:    Weighting factors
-        :type  weights:    ndarray [..., m_points, m_points]
+        :type  weights:    ndarray [..., m_points]
         :param bounds:     Upper and lower bounds for params
         :type  bounds:     ndarray [..., n_params, 2]
         :param num_points: Number of data points for each data set.
@@ -112,7 +112,7 @@ class LMFit(object):
         self.x_data = x_data[..., xp.newaxis]
         self.y_data = y_data[..., xp.newaxis]
         self.params = params[..., xp.newaxis]
-        self.weights = weights
+        self.weights = weights[..., xp.newaxis]
         self.bounds = bounds
 
         lm_step_shape = self.params.shape[:-2] + (1, 1)
@@ -194,12 +194,8 @@ class LMFit(object):
         :returns:   The chi_2 results.
         :rtype:     ndarray [..., 1, 1]
         """
-
-        # TODO: This doesn't get used, can remove it
-        xp = get_backend(self.weights)
-
         y_ypt = Einsum.transpose(y_yp)
-        chi_2 = Einsum.chained_matmul(y_ypt, self.weights, y_yp)
+        chi_2 = Einsum.matmul(y_ypt, self.weights * y_yp)
 
         return chi_2
 
@@ -258,11 +254,8 @@ class LMFit(object):
 
         model = self.get_model_and_J(self.params)
 
-        # [..., n_params, m_points] x [..., m_points, m_points] x [..., m_points, n_params]
-        # = [..., n_params, n_params]
         Jt = Einsum.transpose(model['J'])
-        Jt_w = Einsum.matmul(Jt, self.weights)
-        Jt_w_J = Einsum.matmul(Jt_w, model['J'])
+        Jt_w_J = Einsum.matmul(Jt, self.weights * model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
 
@@ -287,11 +280,8 @@ class LMFit(object):
         chi_2 = self.compute_chi2(y_yp)
 
         # Eqn #13
-        # [..., n_params, m_points] x [..., m_points, m_points] x [..., m_points, n_params]
-        # = [..., n_params, n_params]
         Jt = Einsum.transpose(model['J'])
-        Jt_w = Einsum.matmul(Jt, self.weights)
-        Jt_w_J = Einsum.matmul(Jt_w, model['J'])
+        Jt_w_J = Einsum.matmul(Jt, self.weights * model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
 
@@ -315,12 +305,12 @@ class LMFit(object):
 
         # [..., n_params, m_points] x [..., m_points, 1]
         # = [..., n_params, 1]
-        Jt_w_yyp = Einsum.matmul(Jt_w, y_yp)
+        Jt_w_yyp = Einsum.matmul(Jt, self.weights * y_yp)
 
         # [..., n_params, n_params] x [..., n_params, 1]
         # = [..., n_params, 1]
         h_lm = Einsum.matmul(Jt_w_Jinv, Jt_w_yyp)
-        del model, y_yp, Jt, Jt_w, Jt_w_J, diag, stopped_grad, grad, Jt_w_Jinv
+        del model, y_yp, Jt, Jt_w_J, diag, stopped_grad, grad, Jt_w_Jinv
 
         # Update the parameters and check whether they are in bounds. This algorithm is primarily
         # meant to fit oscillating functions so we stop fitting once a parameter goes out of bounds.
@@ -382,7 +372,7 @@ class LMFit(object):
 
         # 4.1.3 convergence criteria
         Jt = Einsum.transpose(model_new['J'])
-        Jt_w_yyp = Einsum.chained_matmul(Jt, self.weights, y_yp_new)
+        Jt_w_yyp = Einsum.matmul(Jt, self.weights * y_yp_new)
 
         convergence_1 = xp.abs(Jt_w_yyp).max(axis=-2, keepdims=True) < LMFit.epsilon_1
 
