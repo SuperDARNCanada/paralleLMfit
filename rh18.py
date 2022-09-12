@@ -6,6 +6,94 @@ import argparse
 import deepdish as dd
 import copy
 from multiprocessing.pool import ThreadPool
+from backscatter import dmap
+
+V_MAX = 30.0
+W_MAX = 90.0
+
+
+def sdarn_determinations(fit_dict, noise, clutter):
+    pwr0 = fit_dict['p0']
+    wid = fit_dict['W']
+    vel = fit_dict['V']
+    pwr0_err = fit_dict['p0_err']
+    wid_err = fit_dict['W_err']
+    vel_err = fit_dict['V_err']
+    chi_2 = fit_dict['chi_2']
+
+    print('clutter: ', clutter.shape)
+    num_records = pwr0.shape[0]
+
+    noise = noise[..., xp.newaxis]
+
+    sdarn_dict = {}
+    sdarn_dict['fitacf.revision.major'] = [xp.int32(3)] * num_records
+    sdarn_dict['fitacf.revision.minor'] = [xp.int32(0)] * num_records
+    sdarn_dict['noise.sky'] = noise.reshape(noise.size)
+    sdarn_dict['noise.lag0'] = xp.zeros(num_records)
+    sdarn_dict['noise.vel'] = xp.zeros(num_records)
+    sdarn_dict['nlag'] = xp.ones(vel.shape, dtype=xp.int16) * (clutter.shape[1] - 1)  # -1 for the alternate lag0
+
+    p0_db = 10.0 * xp.log10((pwr0 - noise) / noise)
+    p0_db[pwr0 - noise <= 1e-5] = -50.0
+    sdarn_dict['pwr0'] = xp.array(p0_db)
+
+    qflg = xp.ones(pwr0.shape, dtype=xp.int8)
+    sdarn_dict['qflg'] = qflg
+
+    noise_pwr_db = 10 * xp.log10(noise)
+
+    pwr_linear = (10 * xp.log10(pwr0)) - noise_pwr_db
+    pwr_linear_err = xp.abs(pwr0_err) / (xp.log(10.0) * pwr0)
+    sdarn_dict['p_l'] = xp.array(pwr_linear)
+    sdarn_dict['p_l_e'] = xp.array(pwr_linear_err)
+
+    # TODO: Refractive index correction?
+    # sdarn_dict['refrc_idx'] = ?
+    # velocity = vel * (1 / refractive_index)
+    # velocity_err = xp.abs(vel_err) * (1 / refractive_index)
+    sdarn_dict['v'] = xp.array(vel)
+    sdarn_dict['v_e'] = xp.array(vel_err)
+    sdarn_dict['w_l'] = xp.array(wid)
+    sdarn_dict['w_l_e'] = xp.array(wid_err * wid_err)
+    sdarn_dict['sd_l'] = xp.array(chi_2)
+
+    groundscatter = xp.zeros(vel.shape, dtype=xp.int8)
+    groundscatter[xp.abs(vel) - wid * (V_MAX/W_MAX) < 0] = 1
+    sdarn_dict['gflg'] = groundscatter
+
+    # TODO: Quadratic fit
+    sdarn_dict['p_s'] = xp.ones(pwr_linear.shape) * -xp.inf
+    sdarn_dict['p_s_e'] = xp.ones(pwr_linear_err.shape) * xp.nan
+    sdarn_dict['w_s'] = xp.zeros(wid.shape)
+    sdarn_dict['w_s_e'] = xp.zeros(wid_err.shape)
+    sdarn_dict['sd_s'] = xp.zeros(chi_2.shape)
+
+    # TODO: Elevation fitting
+    sdarn_dict['xcf'] = xp.ones(num_records, dtype=xp.int16)     # Flag on whether xcf included for each record
+    sdarn_dict['x_qflg'] = xp.zeros(qflg.shape, dtype=xp.int8)
+    sdarn_dict['x_gflg'] = xp.zeros(groundscatter.shape, dtype=xp.int8)
+    sdarn_dict['phi0'] = xp.zeros(vel.shape)
+    sdarn_dict['phi0_e'] = xp.zeros(vel.shape)
+    sdarn_dict['sd_phi'] = xp.ones(vel.shape) * -1
+    sdarn_dict['x_p_l'] = xp.zeros(pwr_linear.shape)
+    sdarn_dict['x_p_l_e'] = xp.zeros(pwr_linear.shape)
+    sdarn_dict['x_p_s'] = xp.zeros(pwr_linear.shape)
+    sdarn_dict['x_p_s_e'] = xp.zeros(pwr_linear.shape)
+    sdarn_dict['x_v'] = xp.zeros(vel.shape)
+    sdarn_dict['x_v_e'] = xp.zeros(vel.shape)
+    sdarn_dict['x_w_l'] = xp.zeros(wid.shape)
+    sdarn_dict['x_w_l_e'] = xp.zeros(wid.shape)
+    sdarn_dict['x_w_s'] = xp.zeros(wid.shape)
+    sdarn_dict['x_w_s_e'] = xp.zeros(wid.shape)
+    sdarn_dict['x_sd_l'] = xp.zeros(chi_2.shape)
+    sdarn_dict['x_sd_s'] = xp.zeros(chi_2.shape)
+    sdarn_dict['x_sd_phi'] = xp.zeros(chi_2.shape)
+    sdarn_dict['elv'] = xp.ones(vel.shape) * -1
+    sdarn_dict['elv_low'] = xp.zeros(vel.shape)
+    sdarn_dict['elv_high'] = xp.ones(vel.shape) * -1
+
+    return sdarn_dict
 
 
 def determine_noise(pwr0):
@@ -25,6 +113,79 @@ def determine_noise(pwr0):
     # [num_records, 10]
     noise = xp.mean(sorted_pwr0[:, 0:10], axis=1)
     return noise
+
+
+def estimate_re_im_error(t, pwr0, width, vel, noise, clutter, nave, blanking_mask, wavelength):
+    """
+    Use an exponential decay model for the ACF to evaluate the error of the real and imaginary components
+    of fitted ACFs.
+
+    :param      t:              The time spacing for each lag.
+    :type       t:              ndarray [num_records, 1, num_lags]
+    :param      pwr0:           The lag0 power.
+    :type       pwr0:           ndarray [num_records, num_ranges, 1]
+    :param      width:          The fitted spectral width.
+    :type       width:          ndarray [num_records, num_ranges, 1]
+    :param      vel:            The fitted velocity.
+    :type       vel:            ndarray [num_records, num_ranges, 1]
+    :param      noise:          The noise estimates.
+    :type       noise:          ndarray [num_records, ]
+    :param      clutter:        The clutter estimates.
+    :type       clutter:        ndarray [num_records, num_lags+1, num_ranges]
+    :param      nave:           The number of averages.
+    :type       nave:           ndarray [num_records, ]
+    :param      blanking_mask:  The blanking mask to indicate bad points.
+    :type       blanking_mask:  ndarray [num_records, num_ranges, num_lags*2]
+    :param      wavelength:     The wavelength of the transmitted signal.
+    :type       wavelength:     ndarray [num_records, 1, 1]
+
+    :returns:   The estimated real and imaginary fitted errors.
+    :rtype:     ndarray [num_records, num_ranges, num_lags*2]
+    """
+
+    clutter = data_fitting.Einsum.transpose(clutter)[..., :-1]
+
+    # [num_records, num_ranges, 1]
+    # [num_records, 1, 1]
+    # [num_records, num_ranges, num_lags]
+    received_power = (pwr0 + noise[:, xp.newaxis, xp.newaxis] + clutter)
+
+    # [num_records, num_ranges, 1]
+    # [num_records, 1, num_lags]
+    # [num_records, 1, 1]
+    rho = xp.exp(-2 * xp.pi * width * t / wavelength)
+    rho[rho > 0.999] = 0.999
+
+    # [num_records, num_ranges, num_lags]
+    # [num_records, num_ranges, 1]
+    # [num_records, num_ranges, num_lags]
+    rho = rho * pwr0 / received_power
+
+    # [num_records, num_ranges, num_lags]
+    # [num_records, num_ranges, 1]
+    # [num_records, 1, num_lags]
+    # [num_records, 1, 1]
+    rho_real = rho * xp.cos(4 * xp.pi * vel * t / wavelength)
+    rho_imag = rho * xp.sin(4 * xp.pi * vel * t / wavelength)
+
+    # [num_records, num_ranges, num_lags]
+    # [num_records, num_ranges, num_lags]
+    # [num_records, 1, 1]
+    real_error = received_power * xp.sqrt((1 - rho*rho)/2.0 + (rho_real*rho_real)) / \
+                 xp.sqrt(nave[..., xp.newaxis, xp.newaxis].astype(float))
+    imag_error = received_power * xp.sqrt((1 - rho*rho)/2.0 + (rho_imag*rho_imag)) / \
+                 xp.sqrt(nave[..., xp.newaxis, xp.newaxis].astype(float))
+
+    # [num_records, num_ranges, num_lags*2]
+    weights_shape = (real_error.shape[0], real_error.shape[1], real_error.shape[2] * 2)
+    weights = xp.zeros(weights_shape)
+
+    weights[..., 0:real_error.shape[2]] = real_error
+    weights[..., real_error.shape[2]:] = imag_error
+
+    weights[blanking_mask] = 1e-20
+
+    return weights
 
 
 def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
@@ -442,6 +603,49 @@ def compute_model_and_derivatives(x_data, params, **kwargs):
     return model, J
 
 
+def fitted_params_and_errors(fit, confidence):
+    """
+    Extracts the relevant parameters from a fit with a given confidence (number of standard deviations),
+    assuming Gaussian fitted parameter errors.
+
+    :param         fit: Fitted LMFit object
+    :type          fit: LMFit
+    :param  confidence: Confidence interval in terms of standard deviations
+    :type   confidence: float
+    """
+    if confidence <= 0:
+        raise ValueError("Confidence interval must be a positive number.")
+    delta_chi2 = confidence * confidence
+
+    num_params = fit.fitted_params.shape[-1]
+
+    # Only consider fits that converged
+    converged_fits = fit.converged
+    chi_2 = xp.ma.masked_array(fit.chi_2, mask=~converged_fits)
+    param_mask = ~(xp.repeat(converged_fits[..., xp.newaxis], num_params, axis=-1))
+    fitted_params = xp.ma.masked_array(fit.fitted_params, mask=param_mask)
+    fitted_param_errors = xp.einsum('...ii->...i', fit.cov_mat) * confidence
+    fitted_param_errors = xp.ma.masked_array(fitted_param_errors, mask=param_mask)
+
+    # Get the parameters and errors for the best fits of the bunch
+    best_fit_idx = chi_2.argmin(axis=-1, fill_value=xp.inf, keepdims=True)
+    best_fitted_params = xp.take_along_axis(fitted_params, best_fit_idx[..., xp.newaxis], axis=-2)
+    best_fitted_param_errors = xp.take_along_axis(fitted_param_errors, best_fit_idx[..., xp.newaxis], axis=-2)
+
+    # If there are local minima within delta_chi significance of the global minimum, then update the error accordingly
+    global_min_chi2 = xp.take_along_axis(chi_2, best_fit_idx, axis=-1)
+    local_minima_mask = chi_2 <= global_min_chi2 + delta_chi2
+    param_deviations = xp.abs(fitted_params - best_fitted_params)
+    param_deviations.mask |= xp.repeat(local_minima_mask[..., xp.newaxis], num_params, axis=-1)
+    local_minima_param_errors = param_deviations.max(axis=-2)
+    best_fitted_param_errors = xp.maximum(best_fitted_param_errors[..., 0, :], local_minima_param_errors)
+
+    fit_dict = {'chi_2': global_min_chi2[..., 0],
+                'params': best_fitted_params[..., 0, :],
+                'errors': best_fitted_param_errors}
+    return fit_dict
+
+
 def fit_all_records(records_data):
     """
     Top level function to initialize and perform fitting of SuperDARN rawacf data.
@@ -545,8 +749,25 @@ def fit_all_records(records_data):
         weights = xp.reshape(weights[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points*2))
         num_points = good_points[start:stop, ...]
 
-        return data_fitting.LMFit(compute_model_and_derivatives, x_data, y_data, params, weights,
+        fit1 = data_fitting.LMFit(compute_model_and_derivatives, x_data, y_data, params, weights,
                                   bounds=bounds, num_points=num_points, W=W_constant_i, V=V_constant_i)
+
+        # Get the parameters and errors for the best fit of the bunch
+        best_fit_idx = xp.argmin(fit1.chi_2, axis=-1, keepdims=True)
+        fitted_params = xp.take_along_axis(fit1.fitted_params, best_fit_idx[..., xp.newaxis], axis=-2)
+
+        weights = estimate_re_im_error(t[start:stop, ...], fitted_params[..., 0], fitted_params[..., 1],
+                                       fitted_params[..., 2], noise, clutter, num_averages, blanking_mask, wavelength)
+        weights = xp.reshape(weights[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points * 2))
+
+        fit2 = data_fitting.LMFit(compute_model_and_derivatives, x_data, y_data, params, weights,
+                                  bounds=bounds, num_points=num_points, W=W_constant_i, V=V_constant_i)
+        # TODO: Fit the XCF
+
+        # TODO: Get final determinations from the fits
+        confidence = 2  # TODO: Make this configurable
+        fit_dict = fitted_params_and_errors(fit2, confidence)
+        return fit_dict
 
     argv = []
     if even_chunks > 0:
@@ -560,31 +781,45 @@ def fit_all_records(records_data):
 
     fits = p.map(do_fits, argv)
 
-    tmp = ([], [], [], [], [], [])
+    tmp = ([], [], [], [], [], [], [])
 
     for f in fits:
-        # print('fitted_params: ', f.fitted_params.shape)
-        # print('chi_2: ', f.chi_2.shape)
-        # print('cov_mat: ', f.cov_mat.shape)
-        print('converged: ', xp.count_nonzero(f.converged))
-        print('good_fits: ', xp.count_nonzero(xp.any(f.converged, axis=-3)))
 
-        best_fit_idx = xp.argmin(f.chi_2, axis=2, keepdims=True)
-        tmp[0].append(f.fitted_params[..., best_fit_idx, 0, :])
-        tmp[1].append(f.fitted_params[..., best_fit_idx, 1, :])
-        tmp[2].append(f.fitted_params[..., best_fit_idx, 2, :])
-        tmp[3].append(f.cov_mat[..., best_fit_idx, :, :])
-        tmp[4].append(f.converged[..., best_fit_idx, :, :])
-        tmp[5].append(f.chi_2)
+        tmp[0].append(f['params'][..., 0])
+        tmp[1].append(f['params'][..., 1])
+        tmp[2].append(f['params'][..., 2])
+        tmp[3].append(f['errors'][..., 0])
+        tmp[4].append(f['errors'][..., 1])
+        tmp[5].append(f['errors'][..., 2])
+        tmp[6].append(f['chi_2'])
 
     fitted_data = {'p0': xp.vstack(tmp[0]),
                    'W': xp.vstack(tmp[1]),
                    'V': xp.vstack(tmp[2]),
-                   'cov_mat': xp.vstack(tmp[3]),
-                   'converged': xp.vstack(tmp[4]),
-                   'chi_2': xp.vstack(tmp[5])}
+                   'p0_err': xp.vstack(tmp[3]),
+                   'W_err': xp.vstack(tmp[4]),
+                   'V_err': xp.vstack(tmp[5]),
+                   'chi_2': xp.vstack(tmp[6])}
+    for k, v in fitted_data.items():
+        print(f'{k}: {v.shape}')
 
-    return fitted_data
+    fit_file_params = sdarn_determinations(fitted_data, noise, clutter)
+
+    return fit_file_params
+
+
+def dict_to_record_list(param_dict):
+    """Converts a dictionary of params for each record into a list of dictionaries, one per record."""
+    record_dicts = []
+    num_records = param_dict['cp'].shape[0]    # Chose cp arbitrarily, any field should work.
+
+    for record in range(num_records):
+        record_dict = {}
+        for k, v in param_dict.items():
+            record_dict[k] = v[record]
+        record_dicts.append(record_dict)
+
+    return record_dicts
 
 
 def write_to_file(records_data, fitted_data, output_name):
@@ -603,9 +838,14 @@ def write_to_file(records_data, fitted_data, output_name):
 
     records_data.pop('acfd', None)
     records_data.pop('xcfd', None)
-    records_data.pop('slist', None)
+    # records_data.pop('slist', None)
+    records_data.pop('mplgexs', None)
     records_data.pop('pwr0', None)
     records_data.pop('data_mask', None)
+    records_data.pop('ifmode', None)
+    records_data.pop('rawacf.revision.major', None)
+    records_data.pop('rawacf.revision.minor', None)
+    records_data.pop('thr')
 
     for k, v in records_data.items():
         output_data[k] = v
@@ -613,7 +853,9 @@ def write_to_file(records_data, fitted_data, output_name):
     for k, v in fitted_data.items():
         output_data[k] = v
 
-    dd.io.save(output_name, output_data, compression='zlib')
+    record_dicts = dict_to_record_list(output_data)
+    dmap.dicts_to_file(record_dicts, output_name, file_type='fitacf')
+    # dd.io.save(output_name, output_data, compression='zlib')
 
 
 if __name__ == '__main__':
@@ -642,7 +884,8 @@ if __name__ == '__main__':
     fitted_data = fit_all_records(records_data)
 
     output_name = input_file.split('.')
-    output_name[-1] = 'rh18.hdf5'
+    # output_name[-1] = 'rh18.hdf5'
+    output_name[-1] = 'lmfit'
     output_name = ".".join(output_name)
 
     write_to_file(records_data, fitted_data, output_name)

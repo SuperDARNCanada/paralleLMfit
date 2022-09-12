@@ -114,6 +114,7 @@ class LMFit(object):
         self.params = params[..., xp.newaxis]
         self.weights = weights[..., xp.newaxis]
         self.bounds = bounds
+        self.chi_2 = None
 
         lm_step_shape = self.params.shape[:-2] + (1, 1)
 
@@ -126,7 +127,6 @@ class LMFit(object):
         # Using matrix operations, it's not possible to selectively perform fits. Masks are used
         # to avoid fitting issues when fits have finished or failed.
         self.fit_mask = xp.full(lm_step_shape, False)
-        print('Total fits: ', self.fit_mask.size)
 
         self.n_params = self.params.shape[-2]
 
@@ -157,8 +157,7 @@ class LMFit(object):
             if i == n_iters:
                 break
 
-            print("Running step: ", i)
-            self.levenburg_marquardt_iteration()
+            self.levenberg_marquardt_iteration()
 
             if i == 0:
                 # This will be any datasets with num_points <= 0 or that stop on first iteration
@@ -181,8 +180,9 @@ class LMFit(object):
 
             i += 1
 
-        self.compute_cov_mat()
-        self.fitted_params = self.params
+        self.cov_mat = self.compute_cov_mat()
+        self.chi_2 = self.chi_2[..., 0, 0]              # Dimensions are [..., 1, 1]
+        self.fitted_params = self.params[..., 0]        # Dimensions are [..., n_params, 1]
 
     def compute_chi2(self, y_yp):
         """
@@ -264,9 +264,9 @@ class LMFit(object):
         stopped_grad[..., [diag], [diag]] = ~self.converged
         Jt_w_J[stopped_grad] = 1.0
 
-        self.cov_mat = xp.linalg.inv(Jt_w_J)
+        return xp.linalg.inv(Jt_w_J)
 
-    def levenburg_marquardt_iteration(self):
+    def levenberg_marquardt_iteration(self):
         """
         Performs a single step of the LM algorithm.
 
