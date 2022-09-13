@@ -90,8 +90,8 @@ class LMFit(object):
         :type  y_data:     ndarray [..., m_points]
         :param params:     Parameters to vary for fitting
         :type  params:     ndarray [..., n_params]
-        :param weights:    Weighting factors
-        :type  weights:    ndarray [..., m_points]
+        :param weights:    Weighting factors. Can support either full error covariance matrix or measurement error array
+        :type  weights:    ndarray [..., m_points], or ndarray [..., m_points, m_points] if full_covar=True
         :param bounds:     Upper and lower bounds for params
         :type  bounds:     ndarray [..., n_params, 2]
         :param num_points: Number of data points for each data set.
@@ -112,9 +112,13 @@ class LMFit(object):
         self.x_data = x_data[..., xp.newaxis]
         self.y_data = y_data[..., xp.newaxis]
         self.params = params[..., xp.newaxis]
-        self.weights = weights[..., xp.newaxis]
         self.bounds = bounds
         self.chi_2 = None
+
+        if kwargs.get('full_covar', False):
+            self.weights = weights
+        else:
+            self.weights = weights[..., xp.newaxis]
 
         lm_step_shape = self.params.shape[:-2] + (1, 1)
 
@@ -143,12 +147,16 @@ class LMFit(object):
             self.m_points = tmp_points
         else:
             # Same number of points (m_points) in each dataset
-            self.m_points = y_data.shape[-2]
+            self.m_points = self.y_data.shape[-2]
 
         # Max number of iterations set by number of variable parameters
         n_iters = self.n_params * LMFit.iter_multiplier
 
         self.cov_mat = None
+
+        if self.kwargs.get('verbose', False):
+            print('Condition 1 | Condition 2 | Condition 3 | Total Converged')
+            print('------------|-------------|-------------|----------------')
 
         i = 0
         prev_num_stopped_fits = 0
@@ -158,14 +166,18 @@ class LMFit(object):
                 break
 
             self.levenberg_marquardt_iteration()
+            i += 1
 
-            if i == 0:
+            if i == 1:
                 # This will be any datasets with num_points <= 0 or that stop on first iteration
                 prev_num_stopped_fits = xp.count_nonzero(self.fit_mask)
             else:
                 # Number of datasets that converged/failed by the end of this iteration
                 num_stopped_fits = xp.count_nonzero(self.fit_mask)
                 if num_stopped_fits != 0:
+                    # Break if all fits have stopped
+                    if num_stopped_fits == self.fit_mask.size:
+                        break
                     # TODO: Does this mean that if any fits previously stopped (such as if num_points <= 0
                     #  off the gun) and no new fits stopped this iteration, it will break?
                     #  e.g. we have prev_num_stopped_fits = x since num_points = 0 for some datasets,
@@ -174,12 +186,12 @@ class LMFit(object):
                     change = 1 - (float(prev_num_stopped_fits) / float(num_stopped_fits))
                     # Break if the number of fits which stopped this iteration is small compared to
                     # total number of stopped fits
-                    if change < LMFit.epsilon_5:
-                        break
+                    # if change < LMFit.epsilon_5:
+                    #     print('change: ', change)
+                    #     break
                 prev_num_stopped_fits = num_stopped_fits
 
-            i += 1
-
+        print('Number of iterations: ', i)
         self.cov_mat = self.compute_cov_mat()
         self.chi_2 = self.chi_2[..., 0, 0]              # Dimensions are [..., 1, 1]
         self.fitted_params = self.params[..., 0]        # Dimensions are [..., n_params, 1]
@@ -195,7 +207,10 @@ class LMFit(object):
         :rtype:     ndarray [..., 1, 1]
         """
         y_ypt = Einsum.transpose(y_yp)
-        chi_2 = Einsum.matmul(y_ypt, self.weights * y_yp)
+        if self.kwargs.get('full_covar', False):
+            chi_2 = Einsum.chained_matmul(y_ypt, self.weights, y_yp)
+        else:
+            chi_2 = Einsum.matmul(y_ypt, self.weights * y_yp)
 
         return chi_2
 
@@ -255,7 +270,10 @@ class LMFit(object):
         model = self.get_model_and_J(self.params)
 
         Jt = Einsum.transpose(model['J'])
-        Jt_w_J = Einsum.matmul(Jt, self.weights * model['J'])
+        if self.kwargs.get('full_covar', False):
+            Jt_w_J = Einsum.chained_matmul(Jt, self.weights, model['J'])
+        else:
+            Jt_w_J = Einsum.matmul(Jt, self.weights * model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
 
@@ -281,7 +299,10 @@ class LMFit(object):
 
         # Eqn #13
         Jt = Einsum.transpose(model['J'])
-        Jt_w_J = Einsum.matmul(Jt, self.weights * model['J'])
+        if self.kwargs.get('full_covar', False):
+            Jt_w_J = Einsum.chained_matmul(Jt, self.weights, model['J'])
+        else:
+            Jt_w_J = Einsum.matmul(Jt, self.weights * model['J'])
 
         diag = xp.arange(Jt_w_J.shape[-1])
 
@@ -305,7 +326,10 @@ class LMFit(object):
 
         # [..., n_params, m_points] x [..., m_points, 1]
         # = [..., n_params, 1]
-        Jt_w_yyp = Einsum.matmul(Jt, self.weights * y_yp)
+        if self.kwargs.get('full_covar', False):
+            Jt_w_yyp = Einsum.chained_matmul(Jt, self.weights, y_yp)
+        else:
+            Jt_w_yyp = Einsum.matmul(Jt, self.weights * y_yp)
 
         # [..., n_params, n_params] x [..., n_params, 1]
         # = [..., n_params, 1]
@@ -372,7 +396,10 @@ class LMFit(object):
 
         # 4.1.3 convergence criteria
         Jt = Einsum.transpose(model_new['J'])
-        Jt_w_yyp = Einsum.matmul(Jt, self.weights * y_yp_new)
+        if self.kwargs.get('full_covar', False):
+            Jt_w_yyp = Einsum.chained_matmul(Jt, self.weights, y_yp_new)
+        else:
+            Jt_w_yyp = Einsum.matmul(Jt, self.weights * y_yp_new)
 
         convergence_1 = xp.abs(Jt_w_yyp).max(axis=-2, keepdims=True) < LMFit.epsilon_1
 
@@ -381,5 +408,11 @@ class LMFit(object):
         convergence_3 = (chi_2_new / (self.m_points - self.n_params + 1)) < LMFit.epsilon_3
 
         self.converged |= convergence_1 | convergence_2 | convergence_3
+
+        if self.kwargs.get('verbose', False):
+            print('   {:5d}    |   {:5d}     |   {:5d}     |   {:5d}'.format(xp.count_nonzero(convergence_1),
+                                                                             xp.count_nonzero(convergence_2),
+                                                                             xp.count_nonzero(convergence_3),
+                                                                             xp.count_nonzero(self.converged)))
 
         self.fit_mask[self.converged] = True
