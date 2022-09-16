@@ -5,6 +5,7 @@ import time
 import argparse
 import deepdish as dd
 import copy
+import matplotlib.pyplot as plt
 from multiprocessing.pool import ThreadPool
 from backscatter import dmap
 
@@ -12,7 +13,7 @@ V_MAX = 30.0
 W_MAX = 90.0
 
 
-def sdarn_determinations(fit_dict, noise, clutter):
+def sdarn_determinations(fit_dict, noise, blanking_mask):
     pwr0 = fit_dict['p0']
     wid = fit_dict['W']
     vel = fit_dict['V']
@@ -21,7 +22,6 @@ def sdarn_determinations(fit_dict, noise, clutter):
     vel_err = fit_dict['V_err']
     chi_2 = fit_dict['chi_2']
 
-    print('clutter: ', clutter.shape)
     num_records = pwr0.shape[0]
 
     noise = noise[..., xp.newaxis]
@@ -32,30 +32,25 @@ def sdarn_determinations(fit_dict, noise, clutter):
     sdarn_dict['noise.sky'] = noise.reshape(noise.size)
     sdarn_dict['noise.lag0'] = xp.zeros(num_records)
     sdarn_dict['noise.vel'] = xp.zeros(num_records)
-    sdarn_dict['nlag'] = xp.ones(vel.shape, dtype=xp.int16) * (clutter.shape[1] - 1)  # -1 for the alternate lag0
+
+    sdarn_dict['nlag'] = xp.count_nonzero(~blanking_mask, axis=-1) // 2     # TODO: Figure out why this differs
 
     p0_db = 10.0 * xp.log10((pwr0 - noise) / noise)
     p0_db[pwr0 - noise <= 1e-5] = -50.0
-    sdarn_dict['pwr0'] = xp.array(p0_db)
+    sdarn_dict['pwr0'] = xp.array(p0_db)            # TODO: Figure out how much this differs
 
-    qflg = xp.ones(pwr0.shape, dtype=xp.int8)
-    sdarn_dict['qflg'] = qflg
-
-    noise_pwr_db = 10 * xp.log10(noise)
-
-    pwr_linear = (10 * xp.log10(pwr0)) - noise_pwr_db
-    pwr_linear_err = xp.abs(pwr0_err) / (xp.log(10.0) * pwr0)
-    sdarn_dict['p_l'] = xp.array(pwr_linear)
-    sdarn_dict['p_l_e'] = xp.array(pwr_linear_err)
+    sdarn_dict['qflg'] = xp.ones(pwr0.shape, dtype=xp.int8)
 
     # TODO: Refractive index correction?
     # sdarn_dict['refrc_idx'] = ?
     # velocity = vel * (1 / refractive_index)
     # velocity_err = xp.abs(vel_err) * (1 / refractive_index)
-    sdarn_dict['v'] = xp.array(vel)
-    sdarn_dict['v_e'] = xp.array(vel_err)
-    sdarn_dict['w_l'] = xp.array(wid)
-    sdarn_dict['w_l_e'] = xp.array(wid_err * wid_err)
+    sdarn_dict['p_l'] = 10 * xp.log10(pwr0 / noise)
+    sdarn_dict['p_l_e'] = xp.sqrt(pwr0_err) / (xp.log(10.0) * pwr0)
+    sdarn_dict['v'] = xp.array(vel)                         # TODO: Figure out how much this differs
+    sdarn_dict['v_e'] = xp.sqrt(vel_err)                    # TODO: Figure out how much this differs
+    sdarn_dict['w_l'] = xp.array(wid)                       # TODO: Figure out how much this differs
+    sdarn_dict['w_l_e'] = xp.sqrt(wid_err)                  # TODO: Figure out how much this differs
     sdarn_dict['sd_l'] = xp.array(chi_2)
 
     groundscatter = xp.zeros(vel.shape, dtype=xp.int8)
@@ -63,23 +58,23 @@ def sdarn_determinations(fit_dict, noise, clutter):
     sdarn_dict['gflg'] = groundscatter
 
     # TODO: Quadratic fit
-    sdarn_dict['p_s'] = xp.ones(pwr_linear.shape) * -xp.inf
-    sdarn_dict['p_s_e'] = xp.ones(pwr_linear_err.shape) * xp.nan
+    sdarn_dict['p_s'] = xp.ones(pwr0.shape) * -xp.inf
+    sdarn_dict['p_s_e'] = xp.ones(pwr0.shape) * xp.nan
     sdarn_dict['w_s'] = xp.zeros(wid.shape)
     sdarn_dict['w_s_e'] = xp.zeros(wid_err.shape)
     sdarn_dict['sd_s'] = xp.zeros(chi_2.shape)
 
     # TODO: Elevation fitting
     sdarn_dict['xcf'] = xp.ones(num_records, dtype=xp.int16)     # Flag on whether xcf included for each record
-    sdarn_dict['x_qflg'] = xp.zeros(qflg.shape, dtype=xp.int8)
+    sdarn_dict['x_qflg'] = xp.zeros(pwr0.shape, dtype=xp.int8)
     sdarn_dict['x_gflg'] = xp.zeros(groundscatter.shape, dtype=xp.int8)
     sdarn_dict['phi0'] = xp.zeros(vel.shape)
     sdarn_dict['phi0_e'] = xp.zeros(vel.shape)
     sdarn_dict['sd_phi'] = xp.ones(vel.shape) * -1
-    sdarn_dict['x_p_l'] = xp.zeros(pwr_linear.shape)
-    sdarn_dict['x_p_l_e'] = xp.zeros(pwr_linear.shape)
-    sdarn_dict['x_p_s'] = xp.zeros(pwr_linear.shape)
-    sdarn_dict['x_p_s_e'] = xp.zeros(pwr_linear.shape)
+    sdarn_dict['x_p_l'] = xp.zeros(pwr0.shape)
+    sdarn_dict['x_p_l_e'] = xp.zeros(pwr0.shape)
+    sdarn_dict['x_p_s'] = xp.zeros(pwr0.shape)
+    sdarn_dict['x_p_s_e'] = xp.zeros(pwr0.shape)
     sdarn_dict['x_v'] = xp.zeros(vel.shape)
     sdarn_dict['x_v_e'] = xp.zeros(vel.shape)
     sdarn_dict['x_w_l'] = xp.zeros(wid.shape)
@@ -180,8 +175,8 @@ def estimate_re_im_error(t, pwr0, width, vel, noise, clutter, nave, blanking_mas
     weights_shape = (real_error.shape[0], real_error.shape[1], real_error.shape[2] * 2)
     weights = xp.zeros(weights_shape)
 
-    weights[..., 0:real_error.shape[2]] = real_error
-    weights[..., real_error.shape[2]:] = imag_error
+    weights[..., 0:real_error.shape[2]] = 1 / (real_error ** 2)
+    weights[..., real_error.shape[2]:] = 1 / (imag_error ** 2)
 
     weights[blanking_mask] = 1e-20
 
@@ -225,8 +220,8 @@ def first_order_weights(pwr0, noise, clutter, nave, blanking_mask):
     # [num_records, num_ranges, num_lags*2]
     weights = xp.zeros(weights_shape)
 
-    weights[..., 0:error.shape[2]] = 1.0 / error ** 2
-    weights[..., error.shape[2]:] = 1.0 / error ** 2
+    weights[..., 0:error.shape[2]] = 1.0 / (error ** 2)
+    weights[..., error.shape[2]:] = 1.0 / (error ** 2)
 
     # [num_records, num_ranges, num_lags*2]
     weights[..., :][blanking_mask] = 1e-20
@@ -283,6 +278,7 @@ def calculate_samples(num_range_gates, ltab, ptab, mpinc, lagfr, smsep):
 
     # [num_records, 1, 1, num_ranges]
     # [num_records, num_lags+1, 2, 1]
+    # TODO: Take into account alternate lag0 swapping
     samples_for_lags = range_off + lags_pairs_as_samples[..., xp.newaxis]
 
     return pulses_as_samples, samples_for_lags
@@ -324,6 +320,11 @@ def create_blanking_mask(num_range_gates, pulses_as_samples, samples_for_lags, d
     # Blank where data does not exist
     # [num_records, num_lags+1, 2, num_ranges]
     blanking_mask[~data_mask] = True
+
+    # If either sample which contributes to a lag is blanked, then blank the whole lag
+    lag_mask = xp.any(blanking_mask, axis=2, keepdims=True)
+    lag_mask[:, 0, ...] = False     # lag0 has no blanks - alternate lag0 used to fill them in
+    blanking_mask = xp.repeat(lag_mask, 2, axis=2)
 
     # [num_records, ]
     blanking_mask[num_averages <= 0] = True
@@ -381,7 +382,6 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
                        first_range_in_samps[:, xp.newaxis, xp.newaxis, xp.newaxis, xp.newaxis])
     affected_ranges = affected_ranges.astype(int)
 
-    # print(affected_ranges[0,1,0])
     ranges = xp.arange(num_range_gates)
     ranges_reshape = ranges[xp.newaxis, xp.newaxis, xp.newaxis, :, xp.newaxis]
 
@@ -389,8 +389,7 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
     # [num_records, num_lags+1, 2, num_ranges, 1]
     # [1, 1, 1, num_ranges, 1]
     # [num_records, num_lags+1, 2, num_ranges, 1]
-    condition = ((affected_ranges <= samples_for_lags) &
-                 (affected_ranges < num_range_gates) &
+    condition = ((affected_ranges < num_range_gates) &
                  (affected_ranges != ranges_reshape) &
                  (affected_ranges >= 0) &
                  data_mask[..., xp.newaxis])
@@ -418,7 +417,7 @@ def estimate_max_self_clutter(num_range_gates, pulses_as_samples, samples_for_la
     pwr_2 = data_fitting.Einsum.transpose(affected_pwr[:, :, 1])
 
     # [num_records, num_lags+1, num_ranges, num_pulses, 1]
-    # [num_records, num_lags+1, num_ranges, 1, num_ranges]
+    # [num_records, num_lags+1, num_ranges, 1, num_pulses]
     clutter_term3 = xp.einsum('...ijk,...ikm->...i', pwr_1, pwr_2)
 
     # [num_records, num_lags+1, num_ranges]
@@ -539,7 +538,7 @@ def calculate_initial_V(wavelength, num_velocity_models, mpinc):
     # [num_records, 1, 1]
     step = 2 * nyquist_v / num_velocity_models
 
-    tmp = xp.arange(num_velocity_models, dtype=xp.float64)[xp.newaxis, xp.newaxis, :]
+    tmp = xp.arange(num_velocity_models, dtype=xp.float64)[xp.newaxis, xp.newaxis, :] + 0.5
 
     # [1, 1, num_models]
     # [num_records, 1, 1]
@@ -548,8 +547,6 @@ def calculate_initial_V(wavelength, num_velocity_models, mpinc):
     # [num_records, 1, 1]
     # [num_records, 1, num_models]
     nyquist_v_steps = (-1 * nyquist_v) + tmp
-
-    # nyquist_v_steps = nyquist_v_steps[..., xp.newaxis]
 
     return nyquist_v_steps
 
@@ -619,26 +616,20 @@ def fitted_params_and_errors(fit, confidence):
 
     num_params = fit.fitted_params.shape[-1]
 
-    # Only consider fits that converged
-    converged_fits = fit.converged
-    chi_2 = xp.ma.masked_array(fit.chi_2, mask=~converged_fits)
-    param_mask = ~(xp.repeat(converged_fits[..., xp.newaxis], num_params, axis=-1))
-    fitted_params = xp.ma.masked_array(fit.fitted_params, mask=param_mask)
-    fitted_param_errors = xp.einsum('...ii->...i', fit.cov_mat) * confidence
-    fitted_param_errors = xp.ma.masked_array(fitted_param_errors, mask=param_mask)
+    # # Get the parameters and errors for the best fit of the bunch
+    best_fit_idx = xp.argmin(fit.chi_2, axis=-1, keepdims=True)
+    best_fitted_params = xp.take_along_axis(fit.fitted_params, best_fit_idx[..., xp.newaxis], axis=-2)
 
-    # Get the parameters and errors for the best fits of the bunch
-    best_fit_idx = chi_2.argmin(axis=-1, fill_value=xp.inf, keepdims=True)
-    best_fitted_params = xp.take_along_axis(fitted_params, best_fit_idx[..., xp.newaxis], axis=-2)
+    fitted_param_errors = xp.einsum('...ii->...i', fit.cov_mat) * delta_chi2
     best_fitted_param_errors = xp.take_along_axis(fitted_param_errors, best_fit_idx[..., xp.newaxis], axis=-2)
 
-    # If there are local minima within delta_chi significance of the global minimum, then update the error accordingly
-    global_min_chi2 = xp.take_along_axis(chi_2, best_fit_idx, axis=-1)
-    local_minima_mask = chi_2 <= global_min_chi2 + delta_chi2
-    param_deviations = xp.abs(fitted_params - best_fitted_params)
-    param_deviations.mask |= xp.repeat(local_minima_mask[..., xp.newaxis], num_params, axis=-1)
+    # If there are local minima within delta_chi2 significance of the global minimum, then update the error accordingly
+    global_min_chi2 = xp.take_along_axis(fit.chi_2, best_fit_idx, axis=-1)
+    local_minima_mask = fit.chi_2 <= global_min_chi2 + delta_chi2
+    local_minima_mask = xp.repeat(local_minima_mask[..., xp.newaxis], num_params, axis=-1)
+    param_deviations = xp.ma.array(xp.abs(fit.fitted_params - best_fitted_params), mask=~local_minima_mask)
     local_minima_param_errors = param_deviations.max(axis=-2)
-    best_fitted_param_errors = xp.maximum(best_fitted_param_errors[..., 0, :], local_minima_param_errors)
+    best_fitted_param_errors = xp.array(xp.maximum(best_fitted_param_errors[..., 0, :], local_minima_param_errors))
 
     fit_dict = {'chi_2': global_min_chi2[..., 0],
                 'params': best_fitted_params[..., 0, :],
@@ -746,7 +737,7 @@ def fit_all_records(records_data):
         x_data = xp.repeat(t[start:stop, ...], 2, axis=-1)
         x_data = xp.reshape(x_data, (num_records, 1, 1, n_points*2))
         y_data = xp.broadcast_to(acf_i[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points*2))
-        weights = xp.reshape(weights[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points*2))
+        weights = weights[..., xp.newaxis, :]
         num_points = good_points[start:stop, ...]
 
         fit1 = data_fitting.LMFit(compute_model_and_derivatives, x_data, y_data, params, weights,
@@ -758,15 +749,16 @@ def fit_all_records(records_data):
 
         weights = estimate_re_im_error(t[start:stop, ...], fitted_params[..., 0], fitted_params[..., 1],
                                        fitted_params[..., 2], noise, clutter, num_averages, blanking_mask, wavelength)
-        weights = xp.reshape(weights[..., xp.newaxis, :], (num_records, num_ranges, 1, n_points * 2))
+        weights = weights[..., xp.newaxis, :]
 
         fit2 = data_fitting.LMFit(compute_model_and_derivatives, x_data, y_data, params, weights,
                                   bounds=bounds, num_points=num_points, W=W_constant_i, V=V_constant_i)
+
         # TODO: Fit the XCF
 
-        # TODO: Get final determinations from the fits
         confidence = 2  # TODO: Make this configurable
         fit_dict = fitted_params_and_errors(fit2, confidence)
+
         return fit_dict
 
     argv = []
@@ -803,8 +795,9 @@ def fit_all_records(records_data):
     for k, v in fitted_data.items():
         print(f'{k}: {v.shape}')
 
-    fit_file_params = sdarn_determinations(fitted_data, noise, clutter)
+    fit_file_params = sdarn_determinations(fitted_data, noise, blanking_mask)
 
+    # return fitted_data, t, wavelength, acf, fo_weights
     return fit_file_params
 
 
@@ -881,7 +874,44 @@ if __name__ == '__main__':
     else:
         import numpy as xp
 
+    # fitted_data, t, wavelength, acf, weights = fit_all_records(records_data)
     fitted_data = fit_all_records(records_data)
+
+    # # This section is for plotting - for testing purposes
+    # p0 = fitted_data['p0']
+    # W = fitted_data['W']
+    # V = fitted_data['V']
+    #
+    # for i in range(27, 36):
+    #     pwr = p0[0, i]
+    #     wid = W[0, i]
+    #     vel = V[0, i]
+    #
+    #     print('pwr, w, v: ', pwr, wid, vel)
+    #
+    #     model = pwr * xp.exp(-2 * xp.pi * t[0, 0] * wid / wavelength[0, 0, 0]) * \
+    #                   xp.exp(1j * 4 * xp.pi * vel * t[0, 0] / wavelength[0, 0, 0])
+    #     re_model = model.real
+    #     im_model = model.imag
+    #
+    #     blanks = weights < 1e-19
+    #     weights[blanks] = xp.nan
+    #     acf[blanks] = xp.nan
+    #     error = 1 / xp.sqrt(weights)
+    #     num_lags = weights.shape[-1] // 2
+    #
+    #     fig, (ax1, ax2) = plt.subplots(2, 1, sharex='all')
+    #     ax1.errorbar(t[0, 0], acf[0, i, :num_lags], yerr=error[0, i, :num_lags], marker='o', color='blue', label='Real')
+    #     ax2.errorbar(t[0, 0], acf[0, i, num_lags:], yerr=error[0, i, num_lags:], marker='o', color='blue', label='Imag')
+    #     ax1.plot(t[0, 0], re_model, color='red', label='Fitted Real')
+    #     ax2.plot(t[0, 0], im_model, color='red', label='Fitted Imag')
+    #     ax1.legend()
+    #     ax2.legend()
+    #     ax2.set_xlabel('Time (s)')
+    #     ax1.set_ylabel('Amplitude')
+    #     ax2.set_ylabel('Amplitude')
+    #     plt.show()
+    #     plt.close()
 
     output_name = input_file.split('.')
     # output_name[-1] = 'rh18.hdf5'
